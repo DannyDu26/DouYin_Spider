@@ -5,6 +5,7 @@ import time
 import openpyxl
 import requests
 from loguru import logger
+from openpyxl.styles import Alignment, Font, PatternFill
 from retry import retry
 
 
@@ -19,11 +20,46 @@ def norm_text(text):
 
 
 def timestamp_to_str(timestamp):
-    time_local = time.localtime(timestamp / 1000)
+    timestamp = float(timestamp)
+    # 同时兼容秒级和毫秒级时间戳
+    if timestamp > 100000000000:
+        timestamp /= 1000
+    time_local = time.localtime(timestamp)
     dt = time.strftime("%Y-%m-%d %H:%M:%S", time_local)
     return dt
 
+def extract_image_urls(images):
+    """兼容抖音图片字段的新旧数据结构，统一返回 URL 列表。"""
+    if not isinstance(images, list):
+        return []
 
+    image_urls = []
+    for image in images:
+        # 旧接口可能直接返回 URL 字符串
+        if isinstance(image, str) and image:
+            image_urls.append(image)
+            continue
+        if not isinstance(image, dict):
+            continue
+
+        # 新接口在图片对象的 url_list 中提供多个等价地址
+        url_list = image.get('url_list', [])
+        if isinstance(url_list, list):
+            image_url = next((url for url in url_list if isinstance(url, str) and url), None)
+            if image_url:
+                image_urls.append(image_url)
+
+    return image_urls
+
+
+def infer_work_type(data, images, video_addr):
+    """根据作品内容判断类型，兼容抖音新增的 aweme_type。"""
+    # 图集优先，避免图集自带的视频字段造成误判
+    if data.get('aweme_type') == 68 or images:
+        return '图集'
+    if isinstance(video_addr, str) and video_addr:
+        return '视频'
+    return '未知'
 
 def handle_work_info(data):
     sec_uid = data['author']['sec_uid']
@@ -58,9 +94,7 @@ def handle_work_info(data):
     collect_count = data['statistics']['collect_count']
     share_count = data['statistics']['share_count']
     video_addr = data['video']['play_addr']['url_list'][0]
-    images = data['images']
-    if not isinstance(images, list):
-        images = []
+    images = extract_image_urls(data.get('images', []))
     create_time = data['create_time']
 
     text_extra = data['text_extra'] if 'text_extra' in data else []
@@ -71,12 +105,7 @@ def handle_work_info(data):
         if hashtag_name:
             topics.append(hashtag_name)
 
-    work_type = '未知'
-    if 'aweme_type' in data:
-        if data['aweme_type'] == 68:
-            work_type = '图集'
-        elif data['aweme_type'] == 0:
-            work_type = '视频'
+    work_type = infer_work_type(data, images, video_addr)
 
     return {
         'work_id': aweme_id,
@@ -112,11 +141,62 @@ def handle_work_info(data):
 def save_to_xlsx(datas, file_path):
     wb = openpyxl.Workbook()
     ws = wb.active
+    ws.title = '作品信息'
     headers = ['作品id', '作品url', '作品类型', '作品标题', '描述', 'admire数量', '点赞数量', '评论数量', '收藏数量', '分享数量', '视频地址url', '图片地址url列表', '标签', '上传时间', '视频封面url', '用户主页url', '用户id', '昵称', '头像url', '用户描述', '关注数量', '粉丝数量', '作品被赞和收藏数量', '作品数量', '用户年龄', '性别', 'ip归属地']
+    fields = ['work_id', 'work_url', 'work_type', 'title', 'desc', 'admire_count', 'digg_count',
+              'comment_count', 'collect_count', 'share_count', 'video_addr', 'images', 'topics',
+              'create_time', 'video_cover', 'user_url', 'user_id', 'nickname', 'author_avatar',
+              'user_desc', 'following_count', 'follower_count', 'total_favorited', 'aweme_count',
+              'user_age', 'gender', 'ip_location']
     ws.append(headers)
     for data in datas:
-        data = {k: norm_text(str(v)) for k, v in data.items()}
-        ws.append(list(data.values()))
+        row = []
+        for field in fields:
+            value = data.get(field, '')
+            if field == 'create_time' and value not in ('', None):
+                value = timestamp_to_str(value)
+            elif isinstance(value, (list, dict)):
+                value = json.dumps(value, ensure_ascii=False)
+            elif isinstance(value, str):
+                value = norm_text(value)
+            # ID 作为文本保存，避免科学计数法和精度丢失
+            if field in ('work_id', 'user_id'):
+                value = str(value)
+            row.append(value)
+        ws.append(row)
+
+    # 设置适合阅读和筛选的基础样式
+    header_fill = PatternFill('solid', fgColor='1F4E78')
+    for cell in ws[1]:
+        cell.font = Font(color='FFFFFF', bold=True)
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+    ws.freeze_panes = 'A2'
+    ws.auto_filter.ref = ws.dimensions
+    ws.row_dimensions[1].height = 24
+
+    column_widths = {
+        'A': 22, 'B': 42, 'C': 10, 'D': 42, 'E': 42,
+        'F': 12, 'G': 12, 'H': 12, 'I': 12, 'J': 12,
+        'K': 42, 'L': 42, 'M': 30, 'N': 20, 'O': 42,
+        'P': 42, 'Q': 18, 'R': 18, 'S': 42, 'T': 42,
+        'U': 14, 'V': 14, 'W': 20, 'X': 14, 'Y': 12,
+        'Z': 10, 'AA': 14,
+    }
+    for column, width in column_widths.items():
+        ws.column_dimensions[column].width = width
+
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical='top')
+        for column in ('D', 'E', 'M', 'T'):
+            ws[f'{column}{row[0].row}'].alignment = Alignment(vertical='top', wrap_text=True)
+        ws.row_dimensions[row[0].row].height = 60
+    for column in ('A', 'Q'):
+        for cell in ws[column][1:]:
+            cell.number_format = '@'
+            cell.quotePrefix = True
+
     wb.save(file_path)
     logger.info(f'数据保存至 {file_path}')
 

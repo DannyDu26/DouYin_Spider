@@ -5,10 +5,11 @@ import json
 import random
 import base64
 import urllib
+from urllib.parse import urlsplit
 
 import requests
-requests.packages.urllib3.disable_warnings()
 from utils.fingerprint import get_profile
+from utils.http_util import get_douyin_http_timeout, get_douyin_tls_verify
 
 
 def trans_cookies(cookies_str):
@@ -118,15 +119,38 @@ def generate_fake_webid(random_length=19):
     return random_str
 
 
+def _is_trusted_douyin_url(url: str) -> bool:
+    """仅允许向 HTTPS 抖音域名发送登录 Cookie。"""
+    try:
+        parsed = urlsplit(url)
+    except (TypeError, ValueError):
+        return False
+    hostname = (parsed.hostname or '').lower()
+    return parsed.scheme == 'https' and (
+        hostname == 'douyin.com' or hostname.endswith('.douyin.com')
+    )
+
+
 def generate_webid(auth=None, url=""):
     if url == "":
         url = f"https://www.douyin.com/discover?modal_id=7376449060384935209"
+    # 非受信目标直接使用本地 ID，绝不发起携带认证信息的请求。
+    if not _is_trusted_douyin_url(url):
+        return generate_fake_webid()
+    # 配置错误时直接报错，不使用无超时请求
+    timeout = get_douyin_http_timeout()
+    tls_verify = get_douyin_tls_verify()
     try:
         from builder.header import HeaderBuilder, HeaderType
         headers = HeaderBuilder().build(HeaderType.DOC)
         headers.set_header('cookie', auth.cookie_str if auth else "")
         headers.set_header("upgrade-insecure-requests", "1")
-        response = requests.get(url, headers=headers.get(), verify=False)
+        response = requests.get(
+            url,
+            headers=headers.get(),
+            verify=tls_verify,
+            timeout=timeout,
+        )
         res_text = response.text
         user_unique_id = re.findall(r'\\"user_unique_id\\":\\"(.*?)\\"', res_text)[0]
         webid = user_unique_id

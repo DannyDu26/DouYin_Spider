@@ -20,6 +20,23 @@ def load_env():
     dy_live_auth.perepare_auth(cookies_live, "", "")
     return dy_auth
 
+
+def load_dy_auth():
+    """仅加载数据 API 凭证，不初始化直播认证或创建数据目录。"""
+    load_dotenv()
+    cookies_dy = (os.getenv('DY_COOKIES') or '').strip()
+    if not cookies_dy:
+        raise RuntimeError('缺少 DY_COOKIES，API 服务无法启动')
+
+    from builder.auth import DouyinAuth
+    auth = DouyinAuth()
+    auth.perepare_auth(cookies_dy, '', '')
+    auth.ticket = os.getenv('DY_TICKET') or None
+    auth.ts_sign = os.getenv('DY_TS_SIGN') or None
+    auth.client_cert = os.getenv('DY_CLIENT_CERT') or None
+    auth.private_key = os.getenv('DY_PRIVATE_KEY') or None
+    return auth
+
 def init():
     media_base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../datas/media_datas'))
     excel_base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../datas/excel_datas'))

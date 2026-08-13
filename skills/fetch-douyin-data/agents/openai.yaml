@@ -1,0 +1,4 @@
+interface:
+  display_name: "fetch_douyin_data"
+  short_description: "通过项目抖音 API，安全地支持数据抓取与扫码登录会话"
+  default_prompt: "Use $fetch-douyin-data to log in by QR code and fetch Douyin data through this project API."

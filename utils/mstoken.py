@@ -6,11 +6,11 @@ import re
 import time
 
 import requests
-requests.packages.urllib3.disable_warnings()
 
 from utils.strdata_pure import build_report_body
 
 from utils.fingerprint import get_profile
+from utils.http_util import get_douyin_http_timeout, get_douyin_tls_verify
 _REPORT_URL = "https://mssdk.bytedance.com/web/common?ms_appid=6383"
 
 _cache = {"token": "", "ts": 0}
@@ -18,7 +18,8 @@ _TTL = 600
 
 
 def _get_ttwid(ttwid: str = None) -> str:
-    if ttwid:
+    # 显式传入空字符串时不回退 legacy 的 DY_COOKIES。
+    if ttwid is not None:
         return ttwid
     m = re.search(r"ttwid=([^;]+)", os.getenv("DY_COOKIES") or "")
     return m.group(1) if m else ""
@@ -36,9 +37,12 @@ def get_mstoken(ttwid: str = None, proxies: dict = None, use_cache: bool = True)
         "origin": "https://www.douyin.com", "referer": "https://www.douyin.com/",
         "cookie": f"ttwid={tw}" if tw else "",
     }
+    # 配置错误必须直接暴露，不能被网络降级逻辑吞掉。
+    timeout = get_douyin_http_timeout()
+    tls_verify = get_douyin_tls_verify()
     try:
         resp = requests.post(_REPORT_URL, data=envelope.encode("utf-8"), headers=headers,
-                             verify=False, timeout=25, proxies=proxies)
+                             verify=tls_verify, timeout=timeout, proxies=proxies)
         token = resp.headers.get("x-ms-token", "")
         if not token:
             m = re.search(r"msToken=([^;]+)", resp.headers.get("set-cookie", ""))

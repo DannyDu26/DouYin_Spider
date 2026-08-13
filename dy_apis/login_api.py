@@ -1,5 +1,7 @@
 import time
 import urllib.parse
+import inspect
+from contextlib import suppress
 
 import aiohttp
 import asyncio
@@ -17,89 +19,197 @@ from threading import Thread
 import qrcode
 
 
+class BrowserVerificationRequiredError(RuntimeError):
+    """无界面浏览器被抖音验证码中间页拦截。"""
+
+
 class DYLoginApi:
 
     def __init__(self):
         self.base_url = "https://sso.douyin.com/"
         self.home_url = 'https://www.douyin.com/'
 
+    @staticmethod
+    async def _launch_browser(playwright, headless):
+        """优先启动 Playwright Chromium，Windows 可回退到系统 Chrome。"""
+        launch_options = {
+            'headless': headless,
+            'args': ['--disable-blink-features=AutomationControlled'],
+        }
+        browser_channel = os.getenv('PLAYWRIGHT_BROWSER_CHANNEL', '').strip()
+        if browser_channel:
+            launch_options['channel'] = browser_channel
+            return await playwright.chromium.launch(**launch_options)
+
+        try:
+            return await playwright.chromium.launch(**launch_options)
+        except Exception as error:
+            if os.name == 'nt':
+                logger.warning('未找到 Playwright Chromium，回退到系统 Chrome')
+                launch_options['channel'] = 'chrome'
+                return await playwright.chromium.launch(**launch_options)
+            raise RuntimeError(
+                '未安装 Chromium，请执行: python -m playwright install --with-deps chromium'
+            ) from error
+
     # 生成初始cookies
     async def dyGenerateInitData(self, headless=True, cookie_str=""):
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=headless,
-                args=[
-                    '--disable-blink-features=AutomationControlled',
-                ],
-            )
-            context = await browser.new_context()
-            if cookie_str:
-                await context.add_cookies([
-                    {"name": part.strip().partition("=")[0],
-                     "value": part.strip().partition("=")[2],
-                     "domain": ".douyin.com", "path": "/"}
-                    for part in cookie_str.split(";") if part.strip()
-                ])
-            page = await context.new_page()
-            await page.goto(self.home_url)
-            await page.wait_for_load_state("load")
-            keys_str = None
-            web_protect_str = None
-            for _ in range(6):
-                await asyncio.sleep(4)
-                await page.mouse.wheel(0, 600)
-                keys_str = await page.evaluate('localStorage["security-sdk/s_sdk_crypt_sdk"]')
-                web_protect_str = await page.evaluate('localStorage["security-sdk/s_sdk_sign_data_key/web_protect"]')
-                if keys_str and web_protect_str:
-                    break
-            cookies = {cookie['name']: cookie['value'] for cookie in await context.cookies()}
-            await browser.close()
-            auth = DouyinAuth()
-            auth.perepare_auth('', web_protect_str, keys_str)
-            auth.cookie = cookies
-            auth.cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
-            return auth
-
-    # 扫码登录并抓 ticket
-    async def login_grab_ticket(self, headless=False, timeout=180):
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=headless,
-                args=['--disable-blink-features=AutomationControlled'],
-            )
-            page = await browser.new_page()
-            await page.goto(self.home_url)
-            await page.wait_for_load_state("load")
-            await asyncio.sleep(2)
-            await page.evaluate('''() => {
-                const nodes = Array.from(document.querySelectorAll('button, span, div, a'));
-                const hit = nodes.find(n => ['登录','登 录'].includes((n.textContent||'').trim()));
-                if (hit) hit.click();
-            }''')
-            logger.info("请在浏览器里扫码登录")
-            deadline = time.time() + timeout
-            keys_str = None
-            web_protect_str = None
-            while time.time() < deadline:
-                await asyncio.sleep(2)
-                try:
+            browser = await self._launch_browser(p, headless)
+            try:
+                context = await browser.new_context()
+                if cookie_str:
+                    await context.add_cookies([
+                        {"name": part.strip().partition("=")[0],
+                         "value": part.strip().partition("=")[2],
+                         "domain": ".douyin.com", "path": "/"}
+                        for part in cookie_str.split(";") if part.strip()
+                    ])
+                page = await context.new_page()
+                await page.goto(self.home_url)
+                await page.wait_for_load_state("load")
+                keys_str = None
+                web_protect_str = None
+                for _ in range(6):
+                    await asyncio.sleep(4)
+                    await page.mouse.wheel(0, 600)
                     keys_str = await page.evaluate('localStorage["security-sdk/s_sdk_crypt_sdk"]')
                     web_protect_str = await page.evaluate('localStorage["security-sdk/s_sdk_sign_data_key/web_protect"]')
-                except Exception:
-                    # 登录跳转瞬间执行上下文被销毁，下一轮重试
-                    continue
-                if keys_str and web_protect_str:
-                    break
-            if not (keys_str and web_protect_str):
-                await browser.close()
-                raise TimeoutError("登录超时：未抓到 ticket")
-            cookies = {cookie['name']: cookie['value'] for cookie in await page.context.cookies()}
-            await browser.close()
-            auth = DouyinAuth()
-            auth.perepare_auth('', web_protect_str, keys_str)
-            auth.cookie = cookies
-            auth.cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
-            return auth
+                    if keys_str and web_protect_str:
+                        break
+                cookies = {cookie['name']: cookie['value'] for cookie in await context.cookies()}
+                # 使用完整 Cookie 初始化 ttwid 等认证状态
+                complete_cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
+                auth = DouyinAuth()
+                auth.perepare_auth(complete_cookie_str, web_protect_str, keys_str)
+                return auth
+            finally:
+                with suppress(Exception):
+                    await browser.close()
+
+    @staticmethod
+    async def _notify_qrcode(qrcode_callback, qrcode_bytes: bytes):
+        """向调用方传递内存二维码，同时兼容同步和异步回调。"""
+        if qrcode_callback is None:
+            return
+        result = qrcode_callback(qrcode_bytes)
+        if inspect.isawaitable(result):
+            await result
+
+    @staticmethod
+    async def capture_login_qrcode(page, qrcode_path=None) -> bytes:
+        """截取登录二维码；未传路径时全程仅使用内存。"""
+        qrcode_handle = await page.wait_for_function('''() => {
+            const images = Array.from(document.querySelectorAll('article img'));
+            return images.find(image => {
+                const rect = image.getBoundingClientRect();
+                return rect.width >= 120 && rect.height >= 120
+                    && Math.abs(rect.width - rect.height) <= 8;
+            }) || false;
+        }''', timeout=15000)
+        qrcode_image = qrcode_handle.as_element()
+        if not qrcode_image:
+            raise RuntimeError('未找到登录二维码元素')
+
+        screenshot_options = {}
+        if qrcode_path:
+            qrcode_path = os.path.abspath(qrcode_path)
+            os.makedirs(os.path.dirname(qrcode_path), exist_ok=True)
+            screenshot_options['path'] = qrcode_path
+        qrcode_bytes = await qrcode_image.screenshot(**screenshot_options)
+        if qrcode_path:
+            logger.info('登录二维码已保存至 {}', qrcode_path)
+        return qrcode_bytes
+
+    @staticmethod
+    async def wait_and_click_login(page, deadline, headless, poll_interval=1.0):
+        """可视模式等待人工通过验证，然后继续打开登录二维码。"""
+        verification_logged = False
+        while time.time() < deadline:
+            if page.is_closed():
+                raise RuntimeError('登录窗口已关闭')
+            try:
+                title = await page.title()
+                if '验证码中间页' in title:
+                    if headless:
+                        raise BrowserVerificationRequiredError(
+                            '抖音要求浏览器验证，请使用可视模式手工完成'
+                        )
+                    if not verification_logged:
+                        logger.warning('请在浏览器窗口中手工完成抖音验证码')
+                        verification_logged = True
+                else:
+                    clicked = await page.evaluate('''() => {
+                        const nodes = Array.from(document.querySelectorAll('button, span, div, a'));
+                        const hit = nodes.find(
+                            n => ['登录','登 录'].includes((n.textContent||'').trim())
+                        );
+                        if (!hit) return false;
+                        hit.click();
+                        return true;
+                    }''')
+                    if clicked:
+                        return
+            except BrowserVerificationRequiredError:
+                raise
+            except Exception:
+                # 页面跳转期间上下文可能短暂销毁，继续等待即可。
+                pass
+            await asyncio.sleep(poll_interval)
+        raise TimeoutError('登录超时：未找到登录入口或未完成浏览器验证')
+
+    # 扫码登录并抓 ticket
+    async def login_grab_ticket(self, headless=False, timeout=180, qrcode_path=None,
+                                qrcode_callback=None):
+        """扫码登录并返回完整认证，二维码可通过 bytes 回调获取。"""
+        async with async_playwright() as p:
+            browser = await self._launch_browser(p, headless)
+            try:
+                page = await browser.new_page()
+                await page.goto(self.home_url)
+                await page.wait_for_load_state("load")
+                deadline = time.time() + timeout
+                await self.wait_and_click_login(page, deadline, headless)
+                if qrcode_path or qrcode_callback:
+                    qrcode_bytes = await self.capture_login_qrcode(page, qrcode_path)
+                    await self._notify_qrcode(qrcode_callback, qrcode_bytes)
+                logger.info('扫码登录会话已就绪')
+                keys_str = None
+                web_protect_str = None
+                cookies = {}
+                login_cookie_names = ('sessionid', 'sessionid_ss', 'sid_guard', 'uid_tt', 'uid_tt_ss')
+                is_logged_in = False
+                while time.time() < deadline:
+                    await asyncio.sleep(2)
+                    if page.is_closed():
+                        raise RuntimeError("登录窗口已关闭")
+                    try:
+                        keys_str = await page.evaluate('localStorage["security-sdk/s_sdk_crypt_sdk"]')
+                        web_protect_str = await page.evaluate(
+                            'localStorage["security-sdk/s_sdk_sign_data_key/web_protect"]'
+                        )
+                        cookies = {
+                            cookie['name']: cookie['value']
+                            for cookie in await page.context.cookies()
+                        }
+                    except Exception:
+                        # 登录跳转瞬间执行上下文被销毁，下一轮重试
+                        continue
+                    # Cookie 和安全票据都就绪后才算成功
+                    is_logged_in = any(cookies.get(name) for name in login_cookie_names)
+                    if is_logged_in and keys_str and web_protect_str:
+                        break
+                if not (is_logged_in and keys_str and web_protect_str):
+                    raise TimeoutError("登录超时：未检测到完整登录凭证")
+
+                # 必须传入完整 Cookie，否则 ttwid 等派生状态会丢失
+                complete_cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
+                auth = DouyinAuth()
+                auth.perepare_auth(complete_cookie_str, web_protect_str, keys_str)
+                return auth
+            finally:
+                with suppress(Exception):
+                    await browser.close()
 
     # 登录凭证写入 .env
     ENV_FILE = ".env"

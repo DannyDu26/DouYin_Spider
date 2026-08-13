@@ -32,8 +32,19 @@ datas
 /newsign/
 /.idea
 /.claude
+/.history/
 /test_search_oldab.py
 /new/
 
 # 本地环境变量（cookie 与登录凭证，勿入库）
-.env
+.env*
+*.env
+!.env.example
+!.env.dev.example
+!.env.prod.example
+
+# 数据库和企业代理证书文件通过外部挂载，勿入库
+*.pem
+*.key
+*.crt
+*.cer

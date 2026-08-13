@@ -6,7 +6,6 @@ import urllib
 import uuid
 
 import requests
-requests.packages.urllib3.disable_warnings()
 from bs4 import BeautifulSoup
 from loguru import logger
 from google.protobuf.json_format import MessageToDict as _message_to_dict
@@ -21,6 +20,85 @@ from builder.params import Params
 from builder.proto import ProtoBuilder
 from utils.fingerprint import get_profile
 from utils.dy_util import splice_url, generate_a_bogus, generate_msToken, trans_cookies, generate_a_bogus_pure
+from utils.http_util import get_douyin_http_timeout, get_douyin_tls_verify
+
+
+class DouyinAuthenticationError(RuntimeError):
+    """抖音明确返回登录态失效。"""
+
+
+def _is_login_url(raw_url: str) -> bool:
+    """仅识别明确的抖音登录域名或路径，避免误判普通 HTML。"""
+    try:
+        parsed = urllib.parse.urlsplit(raw_url)
+    except (TypeError, ValueError):
+        return False
+    hostname = (parsed.hostname or '').lower()
+    path = parsed.path.lower()
+    login_hosts = (
+        'passport.douyin.com',
+        'login.douyin.com',
+        'sso.douyin.com',
+        'passport.bytedance.com',
+        'sso.bytedance.com',
+    )
+    return hostname in login_hosts or (
+        (hostname == 'douyin.com' or hostname.endswith('.douyin.com'))
+        and (path.startswith('/passport/') or path.startswith('/login') or path.startswith('/sso/'))
+    )
+
+
+def _response_redirects_to_login(response) -> bool:
+    """检查最终地址和重定向 Location 中的明确登录信号。"""
+    candidates = [getattr(response, 'url', '')]
+    for redirect in getattr(response, 'history', ()) or ():
+        location = (getattr(redirect, 'headers', {}) or {}).get('location', '')
+        if location:
+            candidates.append(urllib.parse.urljoin(getattr(redirect, 'url', ''), location))
+    return any(_is_login_url(candidate) for candidate in candidates if candidate)
+
+
+def _extract_aweme_id(raw_url: str) -> str:
+    """从作品详情或 modal 链接中精确提取作品 ID。"""
+    parsed = urllib.parse.urlsplit(raw_url)
+    video_match = re.fullmatch(r'/video/(\d+)/?', parsed.path)
+    if video_match:
+        return video_match.group(1)
+
+    modal_ids = urllib.parse.parse_qs(parsed.query).get('modal_id', [])
+    if len(modal_ids) == 1 and modal_ids[0].isdigit():
+        return modal_ids[0]
+    raise ValueError('无法从链接中提取作品 ID')
+
+
+def parse_douyin_response(response) -> dict:
+    """解析响应，并保守识别账号认证失败。"""
+    if response.status_code in (401, 403):
+        raise DouyinAuthenticationError(f'HTTP {response.status_code}')
+    if _response_redirects_to_login(response):
+        raise DouyinAuthenticationError('上游重定向到登录页')
+
+    data = json.loads(response.text)
+    if not isinstance(data, dict):
+        return data
+
+    status_code = data.get('status_code')
+    message = str(data.get('status_msg') or data.get('message') or '').lower()
+    auth_markers = (
+        '未登录',
+        '请先登录',
+        '请登录后重试',
+        '重新登录',
+        '登录失效',
+        '登录过期',
+        'login required',
+        'not logged in',
+        'not login',
+        'session expired',
+    )
+    if status_code not in (None, 0, '0') and any(marker in message for marker in auth_markers):
+        raise DouyinAuthenticationError('上游登录态失效')
+    return data
 
 
 
@@ -49,6 +127,39 @@ class DouyinAPI:
             work_list.extend(works)
             if res_json["has_more"] != 1:
                 break
+        return work_list
+
+
+    @staticmethod
+    def get_user_some_work_info(auth, user_url: str, page_num: int, **kwargs) -> list:
+        """
+        获取用户指定页数的作品信息.
+        :param auth: DouyinAuth object.
+        :param user_url: 用户主页URL.
+        :param page_num: 需要获取的页数.
+        :return: 指定页数内的作品信息.
+        """
+        if not isinstance(page_num, int) or isinstance(page_num, bool) or page_num <= 0:
+            raise ValueError('page_num 必须是正整数')
+
+        max_cursor = "0"
+        work_list = []
+        for _ in range(page_num):
+            res_json = DouyinAPI.get_user_work_info(auth, user_url, max_cursor)
+            works = res_json.get("aweme_list")
+            if not isinstance(works, list) or not works:
+                break
+
+            work_list.extend(works)
+            if res_json.get("has_more") != 1:
+                break
+
+            next_cursor = str(res_json.get("max_cursor", ""))
+            # 游标异常时及时停止，防止重复请求同一页
+            if not next_cursor or next_cursor == max_cursor:
+                break
+            max_cursor = next_cursor
+
         return work_list
 
 
@@ -108,8 +219,9 @@ class DouyinAPI:
                          auth.msToken)
         params.with_a_bogus()
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
-        return json.loads(resp.text)
+                            params=params.get(), verify=get_douyin_tls_verify(),
+                            timeout=get_douyin_http_timeout())
+        return parse_douyin_response(resp)
 
     @staticmethod
     def get_work_info(auth, url: str) -> dict:
@@ -120,12 +232,38 @@ class DouyinAPI:
         :return: JSON.
         """
         api = f"/aweme/v1/web/aweme/detail/"
-        if 'video' in url:
-            aweme_id = url.split("/")[-1].split("?")[0]
-        else:
-            aweme_id = re.findall(r'modal_id=(\d+)', url)[0]
-            url = f'https://www.douyin.com/video/{aweme_id}'
+        aweme_id = _extract_aweme_id(url)
+        # 使用规范链接，避免将调用方查询参数带入 Referer。
+        url = f'https://www.douyin.com/video/{aweme_id}'
         headers = HeaderBuilder().build(HeaderType.GET)
+
+        # 详情接口优先接受轻量参数；完整签名请求在当前上游可能返回 200 空响应。
+        basic_params = {
+            'device_platform': 'webapp',
+            'aid': '6383',
+            'channel': 'channel_pc_web',
+            'aweme_id': aweme_id,
+        }
+        try:
+            basic_response = requests.get(
+                f'{DouyinAPI.douyin_url}{api}',
+                headers=headers.get(),
+                cookies=auth.cookie,
+                params=basic_params,
+                verify=get_douyin_tls_verify(),
+                timeout=get_douyin_http_timeout(),
+            )
+            basic_result = parse_douyin_response(basic_response)
+        except DouyinAuthenticationError:
+            # 明确的登录失效必须交给账号池冷却处理。
+            raise
+        except (requests.RequestException, json.JSONDecodeError):
+            basic_result = None
+
+        if isinstance(basic_result, dict) and isinstance(basic_result.get('aweme_detail'), dict):
+            return basic_result
+
+        # 轻量请求无有效详情时，保留原有完整签名请求作为兼容兜底。
         headers.set_referer(url)
         params = Params()
         params.add_param("device_platform", "webapp")
@@ -160,25 +298,31 @@ class DouyinAPI:
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
-        resp_json = json.loads(resp.text)
+                            params=params.get(), verify=get_douyin_tls_verify(),
+                            timeout=get_douyin_http_timeout())
+        resp_json = parse_douyin_response(resp)
         return resp_json
 
     @staticmethod
-    def get_work_out_comment(auth, url: str, cursor: str = '0', **kwargs) -> dict:
+    def get_work_out_comment(
+            auth,
+            url: str,
+            cursor: str = '0',
+            count: str = '5',
+            **kwargs,
+    ) -> dict:
         """
         获取作品的全部一级评论.
         :param auth: DouyinAuth object.
         :param url: 作品URL.
         :param cursor: 评论游标.
+        :param count: 本页评论数量.
         :return: JSON.
         """
         api = f"/aweme/v1/web/comment/list/"
-        if 'video' in url:
-            aweme_id = url.split("/")[-1].split("?")[0]
-        else:
-            aweme_id = re.findall(r'modal_id=(\d+)', url)[0]
-            url = f'https://www.douyin.com/video/{aweme_id}'
+        aweme_id = _extract_aweme_id(url)
+        # 评论请求同样只使用规范化作品链接。
+        url = f'https://www.douyin.com/video/{aweme_id}'
         headers = HeaderBuilder().build(HeaderType.GET)
         headers.set_referer(url)
         params = Params()
@@ -187,7 +331,7 @@ class DouyinAPI:
         params.add_param("channel", "channel_pc_web")
         params.add_param("aweme_id", aweme_id)
         params.add_param("cursor", cursor)
-        params.add_param("count", "5")
+        params.add_param("count", str(count))
         params.add_param("item_type", "0")
         params.add_param("whale_cut_token", "")
         params.add_param("cut_version", "1")
@@ -220,9 +364,9 @@ class DouyinAPI:
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
-        resp_json = json.loads(resp.text)
-        return resp_json
+                            params=params.get(), verify=get_douyin_tls_verify(),
+                            timeout=get_douyin_http_timeout())
+        return parse_douyin_response(resp)
 
     @staticmethod
     def get_work_all_out_comment(auth, url: str, **kwargs) -> list:
@@ -246,7 +390,7 @@ class DouyinAPI:
         return comment_list
 
     @staticmethod
-    def get_work_inner_comment(auth, comment: dict, cursor: str, count: str = '3', **kwargs):
+    def get_work_inner_comment(auth, comment: dict, cursor: str = '0', count: str = '3', **kwargs):
         """
         获取作品评论的二级评论.
         :param count: 要获取的二级评论数量.
@@ -299,9 +443,10 @@ class DouyinAPI:
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
-        resp_json = json.loads(resp.text)
-        return resp_json
+                            params=params.get(), verify=get_douyin_tls_verify(),
+                            timeout=get_douyin_http_timeout())
+        # 统一解析认证错误，使账号池可以执行冷却和切换。
+        return parse_douyin_response(resp)
 
     @staticmethod
     def get_work_all_inner_comment(auth, comment: dict, **kwargs) -> list:
@@ -388,8 +533,9 @@ class DouyinAPI:
         params.add_param('fp', auth.cookie['s_v_web_id'])
         params.with_a_bogus()
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
-        return json.loads(resp.text)
+                            params=params.get(), verify=get_douyin_tls_verify(),
+                            timeout=get_douyin_http_timeout())
+        return parse_douyin_response(resp)
 
     @staticmethod
     def search_general_work(auth, query: str, sort_type: str = '0', publish_time: str = '0', offset: str = '0',
@@ -456,8 +602,9 @@ class DouyinAPI:
         # 综合搜索风控(antispam_check)只认新算法签名：纯算 a_bogus（Python 原生执行 bdms VMP）
         params.add_param('a_bogus', generate_a_bogus_pure(api, splice_url(params.get())))
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
-        return json.loads(resp.text)
+                            params=params.get(), verify=get_douyin_tls_verify(),
+                            timeout=get_douyin_http_timeout())
+        return parse_douyin_response(resp)
 
     @staticmethod
     def search_some_general_work(auth, query: str, num: int, sort_type: str, publish_time: str, filter_duration="", search_range="", content_type="", **kwargs) -> list:
@@ -478,11 +625,18 @@ class DouyinAPI:
         while True:
             res_json = DouyinAPI.search_general_work(auth, query, sort_type, publish_time, offset,
                                                      filter_duration, search_range, content_type)
-            works = [w for w in res_json["data"] if w.get("aweme_info")]
+            page_data = res_json.get("data") if isinstance(res_json, dict) else None
+            # 空页或异常页直接结束，避免 has_more 异常导致重复请求同一 offset
+            if not isinstance(page_data, list) or not page_data:
+                break
+            works = [w for w in page_data if isinstance(w, dict) and w.get("aweme_info")]
             work_list.extend(works)
             if res_json["has_more"] != 1 or len(work_list) >= num:
                 break
-            offset = str(int(offset) + len(res_json["data"]))
+            next_offset = str(int(offset) + len(page_data))
+            if next_offset == offset:
+                break
+            offset = next_offset
         if len(work_list) > num:
             work_list = work_list[:num]
         return work_list
