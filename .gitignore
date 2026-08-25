@@ -1,4 +1,5 @@
 __pycache__
+.pytest_cache/
 node_modules/
 *.so
 .Python
@@ -35,6 +36,8 @@ datas
 /.history/
 /test_search_oldab.py
 /new/
+/reports/
+/logs/
 
 # 本地环境变量（cookie 与登录凭证，勿入库）
 .env*

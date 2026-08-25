@@ -19,7 +19,7 @@ from sqlalchemy.engine import Engine, URL, create_engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from builder.auth import DouyinAuth
-from env_config import get_app_env, load_environment
+from app.env_config import get_app_env, load_environment
 
 
 CREDENTIAL_TYPE = 'douyin_api_account_v1'
@@ -557,6 +557,42 @@ class MySQLCredentialStore:
             created_at=created_at,
             auth=auth,
         )
+
+    def delete_credential(self, record: CredentialRecord) -> bool:
+        """精确删除仍与认证快照一致的数据库凭证。"""
+        validate_account_id(record.account_id)
+        if isinstance(record.row_id, bool) or record.row_id <= 0:
+            raise ValueError('credential_id 必须是正整数')
+        serialized = serialize_credential(record.auth)
+        try:
+            with self.engine.begin() as connection:
+                dialect_name = connection.dialect.name
+                type_column = self._case_sensitive(self.table.c.type, dialect_name)
+                account_id_column = self._case_sensitive(
+                    self.table.c.account_id,
+                    dialect_name,
+                )
+                cookie_column = self._case_sensitive(self.table.c.cookie, dialect_name)
+                use_binary = dialect_name in {'mysql', 'mariadb'}
+                credential_type = (
+                    self.credential_type.encode('utf-8') if use_binary else self.credential_type
+                )
+                stored_account_id = (
+                    record.account_id.encode('utf-8') if use_binary else record.account_id
+                )
+                stored_cookie = serialized.encode('utf-8') if use_binary else serialized
+                result = connection.execute(
+                    self.table.delete().where(
+                        self.table.c.id == record.row_id,
+                        self.table.c.project_id == self.project_id,
+                        type_column == credential_type,
+                        account_id_column == stored_account_id,
+                        cookie_column == stored_cookie,
+                    )
+                )
+        except SQLAlchemyError as error:
+            raise CredentialStoreError('删除 MySQL 账号凭证失败') from error
+        return result.rowcount == 1
 
     def close(self) -> None:
         """释放数据库连接池。"""

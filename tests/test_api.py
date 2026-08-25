@@ -13,11 +13,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-from account_pool import AccountPool
-from account_store import CredentialRecord, CredentialStoreError
+from app.account_pool import AccountPool
+from app.account_store import CredentialRecord, CredentialStoreError
+from app.api_schemas import SearchWorksRequest
 from builder.auth import DouyinAuth
-from dy_apis.douyin_api import DouyinAuthenticationError
-from spider_service import SpiderService
+from dy_apis.douyin_api import DouyinAuthenticationError, DouyinRiskControlError
+from app.spider_service import SpiderService
 
 
 def make_work(work_id='100', nickname='测试用户'):
@@ -68,6 +69,7 @@ class FakeDouyinAPI:
         self.comment_args = None
         self.sub_comment_args = None
         self.user_work_args = None
+        self.work_info_urls = []
         self.comment_response = {
             'comments': [make_comment()],
             'cursor': 20,
@@ -80,6 +82,7 @@ class FakeDouyinAPI:
         }
 
     def get_work_info(self, auth, url):
+        self.work_info_urls.append(url)
         work_id = urlsplit(url).path.rstrip('/').rsplit('/', 1)[-1]
         if work_id == '999':
             raise RuntimeError('secret-token=should-not-leak')
@@ -139,7 +142,9 @@ def test_health(client):
             'environment': 'dev',
             'database': 'not_configured',
             'accounts': {'total': 1, 'available': 1, 'cooling': 0, 'invalid': 0},
-            'max_concurrent_requests': 2,
+                'max_concurrent_requests': 2,
+                'max_concurrent_requests_per_account': 2,
+                'test_account_pinning_enabled': False,
         },
     }
 
@@ -148,16 +153,21 @@ def test_openapi_contains_chinese_endpoint_documentation(client):
     """接口文档应包含分组说明、中文标题和请求示例。"""
     schema = client.get('/api/openapi.json').json()
     video_info = schema['paths']['/api/v1/douyin/video_info']['post']
+    sub_comments = schema['paths']['/api/v1/douyin/video_sub_comments']['post']
     works_request = schema['components']['schemas']['WorksRequest']
+    sub_comments_request = schema['components']['schemas']['VideoSubCommentsRequest']
 
     assert schema['info']['description'].startswith('公司内部使用的抖音多账号数据抓取 API')
     assert {tag['name'] for tag in schema['tags']} == {'system', 'auth', 'videos'}
     assert video_info['summary'] == '批量获取作品详情'
+    assert '429' in video_info['responses']
     assert video_info['responses']['502']['description'].startswith('抖音上游')
     assert works_request['properties']['urls']['description'].startswith('抖音作品链接列表')
     assert works_request['examples'][0]['urls'][0].startswith('https://www.douyin.com/video/')
-    # 尚未稳定的二级评论接口不应出现在对外文档中。
-    assert '/api/v1/douyin/video_sub_comments' not in schema['paths']
+    # 二级评论恢复到正式文档，并提供参数说明和请求示例。
+    assert sub_comments['summary'] == '获取视频二级评论'
+    assert sub_comments_request['properties']['comment_id']['description'].startswith('需要查询回复')
+    assert sub_comments_request['examples'][0]['comment_id'].isdigit()
 
 
 def test_documentation_and_health_use_api_prefix(client):
@@ -169,6 +179,116 @@ def test_documentation_and_health_use_api_prefix(client):
     assert client.get('/docs').status_code == 404
     assert client.get('/openapi.json').status_code == 404
     assert client.get('/health').status_code == 404
+
+
+def test_health_reports_actual_per_account_concurrency(fake_api):
+    auth = DouyinAuth()
+    auth.perepare_auth('sessionid=test; s_v_web_id=fp-test', '', '')
+    pool = AccountPool([
+        CredentialRecord(1, 'account-a', datetime.now(timezone.utc), auth),
+    ], max_concurrent_per_account=1)
+    service = SpiderService(account_pool=pool, max_concurrent=10, douyin_api=fake_api)
+
+    with TestClient(main.create_app(service)) as test_client:
+        response = test_client.get('/api/health')
+
+    assert response.status_code == 200
+    assert response.json()['data']['max_concurrent_requests'] == 10
+    assert response.json()['data']['max_concurrent_requests_per_account'] == 1
+
+
+def test_search_account_pinning_is_disabled_by_default(client):
+    response = client.post('/api/v1/douyin/search_videos', json={
+        'query': '测试关键词',
+        'target_account_id': 'default',
+    })
+
+    assert response.status_code == 403
+    assert response.json()['error']['code'] == 'ACCOUNT_PINNING_DISABLED'
+
+
+def test_search_default_example_does_not_pin_an_account():
+    schema = SearchWorksRequest.model_json_schema()
+
+    assert 'target_account_id' not in schema['examples'][0]
+
+
+def test_search_account_pinning_is_forced_off_in_prod(fake_api, monkeypatch):
+    monkeypatch.setattr(main, 'get_app_env', lambda: 'prod')
+    monkeypatch.setattr(main, 'configure_logging', lambda _app_env: None)
+    service = SpiderService(
+        auth=object(),
+        douyin_api=fake_api,
+        test_account_pinning_enabled=True,
+    )
+
+    with TestClient(main.create_app(service)) as test_client:
+        health = test_client.get('/api/health')
+        response = test_client.post('/api/v1/douyin/search_videos', json={
+            'query': '测试关键词',
+            'target_account_id': 'default',
+        })
+
+    assert health.json()['data']['test_account_pinning_enabled'] is False
+    assert response.status_code == 403
+    assert response.json()['error']['code'] == 'ACCOUNT_PINNING_DISABLED'
+
+
+def test_search_can_pin_enabled_test_account(fake_api):
+    first_auth = DouyinAuth()
+    first_auth.label = 'first'
+    second_auth = DouyinAuth()
+    second_auth.label = 'second'
+    pool = AccountPool([
+        CredentialRecord(1, 'account-a', datetime.now(timezone.utc), first_auth),
+        CredentialRecord(2, 'account-b', datetime.now(timezone.utc), second_auth),
+    ])
+    service = SpiderService(
+        account_pool=pool,
+        max_concurrent=2,
+        douyin_api=fake_api,
+        test_account_pinning_enabled=True,
+    )
+
+    with TestClient(main.create_app(service)) as test_client:
+        response = test_client.post('/api/v1/douyin/search_videos', json={
+            'query': '测试关键词',
+            'target_account_id': 'account-b',
+        })
+
+    assert response.status_code == 200
+    assert response.json()['data']['account_id'] == 'account-b'
+    assert response.json()['data']['failover_count'] == 0
+    assert fake_api.search_args[0].label == 'second'
+
+
+def test_pinned_risk_only_cools_actual_account(fake_api, monkeypatch):
+    first_auth = DouyinAuth()
+    second_auth = DouyinAuth()
+    pool = AccountPool([
+        CredentialRecord(1, 'account-a', datetime.now(timezone.utc), first_auth),
+        CredentialRecord(2, 'account-b', datetime.now(timezone.utc), second_auth),
+    ])
+    service = SpiderService(
+        account_pool=pool,
+        douyin_api=fake_api,
+        test_account_pinning_enabled=True,
+    )
+    monkeypatch.setattr(
+        fake_api,
+        'search_some_general_work',
+        lambda *args: (_ for _ in ()).throw(DouyinRiskControlError('http_429')),
+    )
+
+    with TestClient(main.create_app(service)) as test_client:
+        response = test_client.post('/api/v1/douyin/search_videos', json={
+            'query': '测试关键词',
+            'target_account_id': 'account-b',
+        })
+
+    statuses = {item['account_id']: item['status'] for item in pool.list_accounts()}
+    assert response.status_code == 429
+    assert statuses == {'account-a': 'available', 'account-b': 'cooling'}
 
 
 def test_batch_works_supports_partial_success_without_leaking_error(client):
@@ -457,10 +577,10 @@ def test_user_works_returns_normalized_data(client):
     assert body['data']['items'][0]['follower_count'] == 88
 
 
-def test_user_works_accepts_video_id(client, fake_api):
+def test_user_works_accepts_user_id(client, fake_api):
     response = client.post('/api/v1/douyin/user_videos', json={
         'user_url': None,
-        'video_id': '101',
+        'user_id': 'sec-user',
         'page_num': 2,
     })
     body = response.json()
@@ -469,12 +589,15 @@ def test_user_works_accepts_video_id(client, fake_api):
     assert body['data']['total'] == 2
     assert body['data']['user_url'] == 'https://www.douyin.com/user/sec-user'
     assert fake_api.user_work_args[1:] == ('https://www.douyin.com/user/sec-user', 2)
+    # user_id 应直接定位用户，不能额外请求作品详情。
+    assert fake_api.work_info_urls == []
 
 
 @pytest.mark.parametrize('payload', [
     {},
-    {'user_url': 'https://www.douyin.com/user/sec-user', 'video_id': '101'},
-    {'video_id': 'not-a-number'},
+    {'user_url': 'https://www.douyin.com/user/sec-user', 'user_id': 'sec-user'},
+    {'user_id': 'invalid/user'},
+    {'video_id': '101'},
 ])
 def test_user_works_locator_validation(client, payload):
     response = client.post('/api/v1/douyin/user_videos', json=payload)
@@ -514,6 +637,29 @@ def test_search_query_value_is_not_written_to_logs(client, capfd):
     captured = capfd.readouterr()
 
     assert response.status_code == 200
+    assert secret_query not in captured.out
+    assert secret_query not in captured.err
+
+
+def test_search_risk_control_returns_sanitized_429(client, fake_api, monkeypatch, capfd):
+    secret_query = 'confidential-risk-query'
+    secret_body = 'private-upstream-response'
+
+    def raise_risk(*args):
+        raise DouyinRiskControlError('business_risk_signal')
+
+    monkeypatch.setattr(fake_api, 'search_some_general_work', raise_risk)
+    response = client.post('/api/v1/douyin/search_videos', json={'query': secret_query})
+    captured = capfd.readouterr()
+
+    assert response.status_code == 429
+    assert response.json()['error'] == {
+        'code': 'UPSTREAM_RISK_CONTROL',
+        'message': '抖音上游触发访问限制或安全验证',
+        'details': {'signal': 'business_risk_signal'},
+    }
+    assert secret_query not in response.text
+    assert secret_body not in response.text
     assert secret_query not in captured.out
     assert secret_query not in captured.err
 

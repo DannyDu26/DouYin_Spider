@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import getpass
 import json
 import os
 import re
@@ -21,6 +22,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_BASE_URL = "https://crawler.xoyo.com/api/"
 TERMINAL_QR_STATES = {"succeeded", "expired", "failed", "cancelled"}
+ACTION_REQUIRED_QR_STATES = {"verification_required", "waiting_sms_code"}
 
 
 class ClientError(RuntimeError):
@@ -167,7 +169,7 @@ def _login_wait(client: DouyinClient, args: argparse.Namespace) -> dict[str, Any
     while True:
         response = _login_status(client, args.session_id)
         data = _data(response)
-        if data.get("status") in TERMINAL_QR_STATES:
+        if data.get("status") in TERMINAL_QR_STATES | ACTION_REQUIRED_QR_STATES:
             return response
         if time.monotonic() >= deadline:
             raise ClientError(
@@ -198,6 +200,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     login_status = subparsers.add_parser("login-status", help="查询扫码登录状态")
     login_status.add_argument("--session-id", required=True)
+
+    login_sms_request = subparsers.add_parser("login-sms-request", help="请求身份验证短信验证码")
+    login_sms_request.add_argument("--session-id", required=True)
+
+    login_sms_verify = subparsers.add_parser("login-sms-verify", help="安全输入并提交短信验证码")
+    login_sms_verify.add_argument("--session-id", required=True)
 
     login_wait = subparsers.add_parser("login-wait", help="等待扫码登录结束")
     login_wait.add_argument("--session-id", required=True)
@@ -231,7 +239,7 @@ def _build_parser() -> argparse.ArgumentParser:
     user_videos = subparsers.add_parser("user-videos", help="获取用户作品")
     user_locator = user_videos.add_mutually_exclusive_group(required=True)
     user_locator.add_argument("--user-url")
-    user_locator.add_argument("--video-id")
+    user_locator.add_argument("--user-id")
     user_videos.add_argument("--page-num", type=int, default=1)
 
     search = subparsers.add_parser("search-videos", help="搜索作品")
@@ -257,6 +265,26 @@ def _run(client: DouyinClient, args: argparse.Namespace) -> dict[str, Any]:
         return _login_start(client, args)
     if args.command == "login-status":
         return _login_status(client, args.session_id)
+    if args.command == "login-sms-request":
+        encoded_id = quote(args.session_id, safe="")
+        return client.request(
+            "POST",
+            f"v1/douyin/auth/qr-sessions/{encoded_id}/sms/request",
+        )
+    if args.command == "login-sms-verify":
+        # 使用隐藏输入，避免验证码进入命令历史和正常输出。
+        code = getpass.getpass("请输入短信验证码：").strip()
+        if not re.fullmatch(r"\d{4,8}", code):
+            raise ClientError(
+                "短信验证码必须是 4～8 位数字",
+                details={"code": "INVALID_SMS_CODE"},
+            )
+        encoded_id = quote(args.session_id, safe="")
+        return client.request(
+            "POST",
+            f"v1/douyin/auth/qr-sessions/{encoded_id}/sms/verify",
+            {"code": code},
+        )
     if args.command == "login-wait":
         if args.interval <= 0 or args.wait_timeout <= 0:
             raise ClientError("轮询时间参数必须大于 0", details={"code": "INVALID_ARGUMENT"})
@@ -280,7 +308,8 @@ def _run(client: DouyinClient, args: argparse.Namespace) -> dict[str, Any]:
         }
         return client.request("POST", "v1/douyin/video_sub_comments", payload)
     if args.command == "user-videos":
-        locator = {"user_url": args.user_url} if args.user_url else {"video_id": args.video_id}
+        # 用户 ID 可直接定位主页，无需先查询任一作品。
+        locator = {"user_url": args.user_url} if args.user_url else {"user_id": args.user_id}
         payload = {**locator, "page_num": args.page_num}
         return client.request("POST", "v1/douyin/user_videos", payload)
     if args.command == "search-videos":

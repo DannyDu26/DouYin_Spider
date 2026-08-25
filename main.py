@@ -13,9 +13,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from account_pool import AccountPool, NoAvailableAccountError
-from account_store import CredentialStoreError, MySQLCredentialStore
-from api_schemas import (
+from app.account_pool import AccountPool, NoAvailableAccountError
+from app.account_store import CredentialStoreError, MySQLCredentialStore
+from app.api_schemas import (
+    QrSmsCodeRequest,
     QrSessionRequest,
     SearchWorksRequest,
     UserWorksRequest,
@@ -23,9 +24,14 @@ from api_schemas import (
     WorkCommentsRequest,
     WorksRequest,
 )
-from env_config import get_app_env, load_environment
-from qr_login_service import QrLoginService, QrLoginServiceError
-from spider_service import SpiderService, UpstreamServiceError
+from app.env_config import get_app_env, load_environment
+from app.qr_login_service import QrLoginService, QrLoginServiceError
+from app.spider_service import (
+    AccountPinningDisabledError,
+    SpiderService,
+    UpstreamServiceError,
+)
+from dy_apis.douyin_api import DouyinRiskControlError
 
 
 PROD_LOG_DIR = '/data/logs/douyin-spider'
@@ -85,13 +91,14 @@ OPENAPI_TAGS = [
     },
     {
         'name': 'videos',
-        'description': '获取作品详情、一级评论、用户作品和关键词搜索结果。',
+        'description': '获取作品详情、一级评论、二级评论、用户作品和关键词搜索结果。',
     },
 ]
 
 # 常见错误响应仅用于完善 OpenAPI 文档，不改变实际异常处理。
 SCRAPE_ERROR_RESPONSES = {
     422: {'description': '请求参数或抖音链接校验失败。'},
+    429: {'description': '抖音上游返回明确的访问频率或安全验证信号。'},
     502: {'description': '抖音上游网络异常、响应异常或全部作品抓取失败。'},
     503: {'description': '当前没有可用账号，或账号正在冷却。'},
 }
@@ -209,6 +216,11 @@ def create_app(
                 qr_service = QrLoginService(store, spider.account_pool)
                 app_instance.state.qr_login_service = qr_service
 
+            # 账号定向只允许 dev 测试实例，生产环境即使误配也强制关闭。
+            spider.test_account_pinning_enabled = bool(
+                spider.test_account_pinning_enabled and app_env == 'dev'
+            )
+
             refresh_method = getattr(spider.account_pool, 'refresh', None)
             if store is not None and callable(refresh_method):
                 refresh_interval = _positive_int_from_env(
@@ -249,7 +261,7 @@ def create_app(
 
     application = FastAPI(
         title='DouYin Spider Internal API',
-        version='1.4.0',
+        version='1.6.0',
         description=(
             '公司内部使用的抖音多账号数据抓取 API。\n\n'
             '所有接口统一返回 JSON：成功响应包含 `success`、`request_id` 和 `data`；'
@@ -312,6 +324,29 @@ def create_app(
     async def upstream_error_handler(request: Request, error: UpstreamServiceError):
         return _error_response(request, 'UPSTREAM_ERROR', error.message, 502, error.details)
 
+    @application.exception_handler(AccountPinningDisabledError)
+    async def account_pinning_disabled_handler(
+            request: Request,
+            error: AccountPinningDisabledError,
+    ):
+        return _error_response(
+            request,
+            'ACCOUNT_PINNING_DISABLED',
+            '服务未启用测试账号定向能力',
+            403,
+        )
+
+    @application.exception_handler(DouyinRiskControlError)
+    async def risk_control_error_handler(request: Request, error: DouyinRiskControlError):
+        # 仅返回稳定信号，不暴露上游正文和请求参数。
+        return _error_response(
+            request,
+            'UPSTREAM_RISK_CONTROL',
+            '抖音上游触发访问限制或安全验证',
+            429,
+            {'signal': error.signal},
+        )
+
     @application.exception_handler(Exception)
     async def internal_error_handler(request: Request, error: Exception):
         # 不记录异常正文，避免意外泄漏凭证或数据库连接信息
@@ -349,6 +384,8 @@ def create_app(
             'database': database_status,
             'accounts': stats,
             'max_concurrent_requests': spider.max_concurrent,
+            'max_concurrent_requests_per_account': spider.max_concurrent_per_account,
+            'test_account_pinning_enabled': spider.test_account_pinning_enabled,
         }, status_code=status_code)
 
     @application.get(
@@ -388,8 +425,10 @@ def create_app(
         tags=['auth'],
         summary='查询扫码登录状态',
         description=(
-            '查询扫码会话的当前状态。可能的状态包括 `starting`、`waiting_scan`、'
-            '`committing`、`succeeded`、`expired`、`failed` 和 `cancelled`。'
+            '查询扫码会话的当前状态。扫码后如需短信验证，会依次出现 '
+            '`verification_required`、`requesting_sms`、`waiting_sms_code` 和 '
+            '`verifying_sms`；其余状态包括 `starting`、`waiting_scan`、`committing`、'
+            '`succeeded`、`expired`、`failed` 和 `cancelled`。'
         ),
         response_description='扫码登录会话的当前状态。',
         responses=QR_ERROR_RESPONSES,
@@ -402,6 +441,50 @@ def create_app(
         if qr_service is None:
             return _error_response(request, 'QR_LOGIN_UNAVAILABLE', '扫码登录服务不可用', 503)
         return _response(request, await qr_service.get_session(session_id))
+
+    @application.post(
+        '/api/v1/douyin/auth/qr-sessions/{session_id}/sms/request',
+        tags=['auth'],
+        summary='请求扫码登录短信验证码',
+        description=(
+            '扫码会话状态为 `verification_required` 时选择“接收短信验证码”；状态为 '
+            '`waiting_sms_code` 时再次调用则重新发送。随后轮询到 `waiting_sms_code` 即可提交验证码。'
+        ),
+        response_description='已接收短信请求的扫码登录会话。',
+        responses=QR_ERROR_RESPONSES,
+    )
+    async def request_qr_sms_code(
+            session_id: Annotated[str, Path(description='扫码登录会话 ID。')],
+            request: Request,
+    ):
+        qr_service = getattr(request.app.state, 'qr_login_service', None)
+        if qr_service is None:
+            return _error_response(request, 'QR_LOGIN_UNAVAILABLE', '扫码登录服务不可用', 503)
+        return _response(request, await qr_service.request_sms_code(session_id))
+
+    @application.post(
+        '/api/v1/douyin/auth/qr-sessions/{session_id}/sms/verify',
+        tags=['auth'],
+        summary='提交扫码登录短信验证码',
+        description=(
+            '仅当扫码会话状态为 `waiting_sms_code` 时调用。验证码只在当前登录任务的内存中短暂传递，'
+            '不会写入应用日志或数据库；提交后继续轮询会话直到 `succeeded`。'
+        ),
+        response_description='正在校验短信验证码的扫码登录会话。',
+        responses=QR_ERROR_RESPONSES,
+    )
+    async def verify_qr_sms_code(
+            session_id: Annotated[str, Path(description='扫码登录会话 ID。')],
+            payload: QrSmsCodeRequest,
+            request: Request,
+    ):
+        qr_service = getattr(request.app.state, 'qr_login_service', None)
+        if qr_service is None:
+            return _error_response(request, 'QR_LOGIN_UNAVAILABLE', '扫码登录服务不可用', 503)
+        return _response(
+            request,
+            await qr_service.submit_sms_code(session_id, payload.code),
+        )
 
     @application.delete(
         '/api/v1/douyin/auth/qr-sessions/{session_id}',
@@ -457,8 +540,6 @@ def create_app(
 
     @application.post(
         '/api/v1/douyin/video_sub_comments',
-        # 二级评论接口尚不稳定，暂时不在 Swagger/OpenAPI 中展示。
-        include_in_schema=False,
         tags=['videos'],
         summary='获取视频二级评论',
         description=(
@@ -482,7 +563,7 @@ def create_app(
         '/api/v1/douyin/user_videos',
         tags=['videos'],
         summary='获取用户作品',
-        description='根据抖音用户主页链接，或该用户任一作品的 `video_id`，获取指定页数的标准化作品数据。',
+        description='根据抖音用户主页链接或主页路径中的 `user_id`，获取指定页数的标准化作品数据。',
         response_description='用户信息、作品列表和实际使用的账号信息。',
         responses=SCRAPE_ERROR_RESPONSES,
     )
@@ -491,7 +572,7 @@ def create_app(
             payload.user_url,
             payload.page_num,
             request.state.request_id,
-            video_id=payload.video_id,
+            user_id=payload.user_id,
         )
         return _response(request, data)
 

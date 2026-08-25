@@ -6,7 +6,12 @@ import pytest
 
 import dy_apis.douyin_api as douyin_module
 from builder.params import Params
-from dy_apis.douyin_api import DouyinAPI, DouyinAuthenticationError, parse_douyin_response
+from dy_apis.douyin_api import (
+    DouyinAPI,
+    DouyinAuthenticationError,
+    DouyinRiskControlError,
+    parse_douyin_response,
+)
 
 
 class FakeResponse:
@@ -20,6 +25,46 @@ class FakeResponse:
 def test_http_authentication_failure_is_detected():
     with pytest.raises(DouyinAuthenticationError):
         parse_douyin_response(FakeResponse(status_code=401))
+
+
+def test_http_rate_limit_is_detected_without_response_body():
+    secret = 'sensitive-upstream-body'
+    with pytest.raises(DouyinRiskControlError) as caught:
+        parse_douyin_response(FakeResponse(status_code=429, text=secret))
+
+    assert caught.value.signal == 'http_429'
+    assert secret not in str(caught.value)
+
+
+def test_verification_redirect_is_detected():
+    response = FakeResponse(
+        text='<html>secret verification page</html>',
+        url='https://verify.snssdk.com/captcha/',
+    )
+
+    with pytest.raises(DouyinRiskControlError) as caught:
+        parse_douyin_response(response)
+
+    assert caught.value.signal == 'verification_redirect'
+
+
+@pytest.mark.parametrize('message', ['访问过于频繁', '请完成安全验证', 'antispam check failed'])
+def test_business_risk_signal_is_detected(message):
+    response = FakeResponse(payload={'status_code': 1, 'status_msg': message})
+
+    with pytest.raises(DouyinRiskControlError) as caught:
+        parse_douyin_response(response)
+
+    assert caught.value.signal == 'business_risk_signal'
+
+
+def test_search_rate_limit_business_code_is_detected():
+    response = FakeResponse(payload={'status_code': 2484, 'status_msg': '搜索频率受限'})
+
+    with pytest.raises(DouyinRiskControlError) as caught:
+        parse_douyin_response(response)
+
+    assert caught.value.signal == 'business_risk_signal'
 
 
 @pytest.mark.parametrize('message', ['登录失效，请重新登录', '请先登录', '请登录后重试'])
@@ -38,6 +83,17 @@ def test_passport_service_failure_is_not_misclassified_as_account_failure():
 def test_normal_business_response_is_preserved():
     payload = {'status_code': 0, 'aweme_detail': {'aweme_id': '1'}}
     assert parse_douyin_response(FakeResponse(payload=payload)) == payload
+
+
+def test_search_nonzero_business_code_is_not_treated_as_empty_success(monkeypatch):
+    monkeypatch.setattr(
+        DouyinAPI,
+        'search_general_work',
+        lambda *args, **kwargs: {'status_code': 500, 'status_msg': 'service unavailable'},
+    )
+
+    with pytest.raises(ValueError, match='非零业务码'):
+        DouyinAPI.search_some_general_work(object(), 'query', 1, '0', '0')
 
 
 def test_login_redirect_returning_html_is_authentication_failure():

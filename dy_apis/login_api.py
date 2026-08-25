@@ -6,6 +6,7 @@ from contextlib import suppress
 import aiohttp
 import asyncio
 import os
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 import requests
 from loguru import logger
@@ -21,6 +22,19 @@ import qrcode
 
 class BrowserVerificationRequiredError(RuntimeError):
     """无界面浏览器被抖音验证码中间页拦截。"""
+
+
+class QrCodeNotFoundError(RuntimeError):
+    """登录入口已触发，但未在弹窗中找到二维码。"""
+
+
+class SmsVerificationInteractionError(RuntimeError):
+    """短信页面操作失败，仅携带可安全公开的阶段错误。"""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.safe_message = message
 
 
 class DYLoginApi:
@@ -97,38 +111,514 @@ class DYLoginApi:
             await result
 
     @staticmethod
-    async def capture_login_qrcode(page, qrcode_path=None) -> bytes:
-        """截取登录二维码；未传路径时全程仅使用内存。"""
-        qrcode_handle = await page.wait_for_function('''() => {
-            const images = Array.from(document.querySelectorAll('article img'));
-            return images.find(image => {
-                const rect = image.getBoundingClientRect();
-                return rect.width >= 120 && rect.height >= 120
-                    && Math.abs(rect.width - rect.height) <= 8;
-            }) || false;
-        }''', timeout=15000)
-        qrcode_image = qrcode_handle.as_element()
-        if not qrcode_image:
-            raise RuntimeError('未找到登录二维码元素')
-
-        screenshot_options = {}
-        if qrcode_path:
-            qrcode_path = os.path.abspath(qrcode_path)
-            os.makedirs(os.path.dirname(qrcode_path), exist_ok=True)
-            screenshot_options['path'] = qrcode_path
-        qrcode_bytes = await qrcode_image.screenshot(**screenshot_options)
-        if qrcode_path:
-            logger.info('登录二维码已保存至 {}', qrcode_path)
-        return qrcode_bytes
+    async def _notify_verification(
+            verification_callback,
+            status: str,
+            error_code: str | None = None,
+            error_message: str | None = None,
+    ):
+        """通知服务身份验证状态，回调参数不得包含验证码。"""
+        if verification_callback is None:
+            return
+        result = verification_callback(status, error_code, error_message)
+        if inspect.isawaitable(result):
+            await result
 
     @staticmethod
-    async def wait_and_click_login(page, deadline, headless, poll_interval=1.0):
+    async def _page_body_text(page) -> str:
+        """读取页面可见文本，页面跳转期间失败时按空文本处理。"""
+        try:
+            return await page.locator('body').inner_text(timeout=3000)
+        except Exception:
+            return ''
+
+    @staticmethod
+    async def _click_visible_text(page, texts: tuple[str, ...]) -> bool:
+        """按给定顺序点击完全匹配的可见文本。"""
+        return bool(await page.evaluate('''(texts) => {
+            const nodes = Array.from(document.querySelectorAll(
+                'button, [role="button"], a, div, span'
+            ));
+            for (const text of texts) {
+                const hit = nodes.find(node => {
+                    const value = (node.textContent || '').trim();
+                    const rect = node.getBoundingClientRect();
+                    return value === text && rect.width > 0 && rect.height > 0;
+                });
+                if (hit) {
+                    hit.click();
+                    return true;
+                }
+            }
+            return false;
+        }''', list(texts)))
+
+    @staticmethod
+    async def _click_enabled_button(
+            page,
+            texts: tuple[str, ...],
+            timeout_seconds: float = 3.0,
+    ) -> bool:
+        """等待 React 将按钮启用后再点击，避免填充后立即点击被忽略。"""
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            for text in texts:
+                locator = page.get_by_role('button', name=text, exact=True)
+                for index in range(await locator.count()):
+                    candidate = locator.nth(index)
+                    if (
+                            await candidate.is_visible()
+                            and await candidate.is_enabled()
+                            and await DYLoginApi._is_element_interactable(candidate)
+                    ):
+                        await candidate.click()
+                        return True
+            # 抖音部分版本使用 div/span 模拟按钮，需要检查 class/aria 后点击。
+            clicked = await page.evaluate('''(texts) => {
+                const nodes = Array.from(document.querySelectorAll(
+                    'button, [role="button"], div, span'
+                ));
+                for (const text of texts) {
+                    const node = nodes.find(item => {
+                        const rect = item.getBoundingClientRect();
+                        if ((item.textContent || '').trim() !== text
+                                || rect.width <= 0 || rect.height <= 0) {
+                            return false;
+                        }
+                        const top = document.elementFromPoint(
+                            rect.left + rect.width / 2,
+                            rect.top + rect.height / 2
+                        );
+                        return top === item
+                            || item.contains(top)
+                            || (top && top.contains(item));
+                    });
+                    if (!node) continue;
+                    const target = node.closest('button, [role="button"]') || node;
+                    const className = String(target.className || '').toLowerCase();
+                    const disabled = target.disabled
+                        || target.getAttribute('aria-disabled') === 'true'
+                        || className.includes('disabled');
+                    if (!disabled) {
+                        target.click();
+                        return true;
+                    }
+                }
+                return false;
+            }''', list(texts))
+            if clicked:
+                return True
+            await page.wait_for_timeout(100)
+        return False
+
+    @classmethod
+    async def _click_login_entry(cls, page) -> bool:
+        """优先点击抖音头部原生登录按钮，再回退到通用定位。"""
+        locator = page.locator(
+            '#douyin-header-menuCt button[type="button"]'
+        )
+        for index in range(await locator.count()):
+            candidate = locator.nth(index)
+            if not await candidate.is_visible() or not await candidate.is_enabled():
+                continue
+            button_text = ''.join((await candidate.inner_text()).split())
+            if button_text != '登录':
+                continue
+            aria_disabled = await candidate.get_attribute('aria-disabled')
+            if aria_disabled == 'true' or not await cls._is_element_interactable(candidate):
+                continue
+            try:
+                await candidate.click(timeout=3000)
+                return True
+            except Exception:
+                # 页面重绘可能使精确按钮瞬间失效，继续使用通用定位重试。
+                break
+        return await cls._click_enabled_button(page, ('登录', '登 录'))
+
+    @staticmethod
+    async def _find_visible_sms_input(page):
+        """查找可见短信输入框，不读取其中的验证码内容。"""
+        selectors = (
+            '#uc-second-verify input#button-input',
+            '#uc-second-verify input[name="button-input"]',
+            '#button-input',
+            'input[name="button-input"]',
+            'input[placeholder*="验证码"]',
+            'input[inputmode="numeric"]',
+            'input[type="tel"]',
+            'input[maxlength="6"]',
+        )
+        for selector in selectors:
+            locator = page.locator(selector)
+            for index in range(await locator.count()):
+                candidate = locator.nth(index)
+                if (
+                        await candidate.is_visible()
+                        and await DYLoginApi._is_element_interactable(candidate)
+                ):
+                    return candidate
+        return None
+
+    @staticmethod
+    async def _is_element_interactable(locator) -> bool:
+        """确认元素中心点未被另一层弹窗或遮罩覆盖。"""
+        return bool(await locator.evaluate('''element => {
+            const rect = element.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return false;
+            const x = Math.max(0, Math.min(
+                window.innerWidth - 1,
+                rect.left + rect.width / 2
+            ));
+            const y = Math.max(0, Math.min(
+                window.innerHeight - 1,
+                rect.top + rect.height / 2
+            ));
+            const top = document.elementFromPoint(x, y);
+            return top === element
+                || element.contains(top)
+                || (top && top.contains(element));
+        }'''))
+
+    @staticmethod
+    async def _click_known_sms_submit(page) -> bool:
+        """优先点击抖音登录组件中具有稳定 ID 的提交控件。"""
+        locator = page.locator('#douyin_login_comp_btn_id')
+        for index in range(await locator.count()):
+            candidate = locator.nth(index)
+            if not await candidate.is_visible():
+                continue
+            if not await DYLoginApi._is_element_interactable(candidate):
+                continue
+            button_text = (await candidate.inner_text()).strip()
+            if button_text not in {'确认', '验证', '提交', '下一步', '完成'}:
+                continue
+            clickable = await candidate.evaluate('''element => {
+                const className = String(element.className || '').toLowerCase();
+                return element.getAttribute('aria-disabled') !== 'true'
+                    && !className.includes('disabled');
+            }''')
+            if clickable:
+                try:
+                    await candidate.click(timeout=2000)
+                    return True
+                except Exception:
+                    try:
+                        # 遮罩层拦截鼠标事件时直接触发精确 ID 控件。
+                        return bool(await candidate.evaluate('''element => {
+                            element.click();
+                            return true;
+                        }'''))
+                    except Exception:
+                        # 精确 ID 点击失败后继续使用通用文本定位。
+                        continue
+        return False
+
+    @staticmethod
+    async def _click_second_verify_submit(page, timeout_seconds: float = 3.0) -> bool:
+        """在稳定弹窗内按精确文案定位验证按钮并触发点击。"""
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            panel = page.locator('#uc-second-verify')
+            locator = panel.get_by_text('验证', exact=True)
+            for index in range(await locator.count()):
+                candidate = locator.nth(index)
+                if not await candidate.is_visible():
+                    continue
+                if not await DYLoginApi._is_element_interactable(candidate):
+                    continue
+                if (await candidate.inner_text()).strip() != '验证':
+                    continue
+                enabled = await candidate.evaluate('''element => {
+                    const className = String(element.className || '').toLowerCase();
+                    return element.getAttribute('aria-disabled') !== 'true'
+                        && !className.includes('disabled');
+                }''')
+                if not enabled:
+                    continue
+
+                # 探针挂在 document，避免 React 重绘替换按钮节点后监听丢失。
+                probe_armed = await page.evaluate('''() => {
+                    window.__douyinSmsVerifyClick = {
+                        clicked: false,
+                        trusted: false,
+                    };
+                    if (window.__douyinSmsVerifyClickHandler) {
+                        document.removeEventListener(
+                            'click',
+                            window.__douyinSmsVerifyClickHandler,
+                            true
+                        );
+                    }
+                    if (!document.querySelector('#uc-second-verify')) return false;
+                    window.__douyinSmsVerifyClickHandler = event => {
+                        const matched = event.composedPath().some(node =>
+                            node instanceof HTMLElement
+                            && node.dataset.codexSmsSubmit === '1'
+                        );
+                        if (!matched) return;
+                        window.__douyinSmsVerifyClick = {
+                            clicked: true,
+                            trusted: event.isTrusted,
+                        };
+                    };
+                    document.addEventListener(
+                        'click',
+                        window.__douyinSmsVerifyClickHandler,
+                        true
+                    );
+                    return true;
+                }''')
+                if not probe_armed:
+                    continue
+
+                try:
+                    # 同步标记并点击，避免 Playwright click 静默无效。
+                    await candidate.evaluate('''element => {
+                        element.dataset.codexSmsSubmit = '1';
+                        element.click();
+                        return true;
+                    }''')
+                except Exception as error:
+                    raise SmsVerificationInteractionError(
+                        'QR_SMS_BUTTON_CLICK_FAILED',
+                        '短信验证按钮点击事件执行失败，请重试',
+                    ) from error
+
+                await page.wait_for_timeout(50)
+                probe = await page.evaluate(
+                    '() => window.__douyinSmsVerifyClick || null'
+                )
+                if not probe or not probe.get('clicked'):
+                    raise SmsVerificationInteractionError(
+                        'QR_SMS_BUTTON_CLICK_NOT_RECEIVED',
+                        '短信验证按钮未收到点击事件，请重试',
+                    )
+                logger.info(
+                    '短信验证按钮已收到点击事件 trusted={}',
+                    bool(probe.get('trusted')),
+                )
+                return True
+            await page.wait_for_timeout(100)
+        return False
+
+    @staticmethod
+    async def _set_input_dom_value(input_locator, value: str) -> None:
+        """使用原生 setter 更新受控输入框，并补齐前端监听事件。"""
+        await input_locator.evaluate('''(input, value) => {
+            const descriptor = Object.getOwnPropertyDescriptor(
+                HTMLInputElement.prototype,
+                'value'
+            );
+            descriptor.set.call(input, value);
+            input.dispatchEvent(new InputEvent('input', {
+                bubbles: true,
+                inputType: 'insertText',
+                data: null,
+            }));
+            input.dispatchEvent(new Event('change', {bubbles: true}));
+        }''', value)
+
+    @classmethod
+    async def _is_identity_verification(
+            cls,
+            page,
+            body_text: str,
+            verification_announced: bool,
+    ) -> bool:
+        """结合页面文本和 input 属性识别短信验证页。"""
+        sms_input_visible = await cls._find_visible_sms_input(page) is not None
+        choose_method_page = (
+            '身份验证' in body_text
+            and any(marker in body_text for marker in (
+                '接收短信验证码',
+                '验证码',
+                '发送短信验证',
+            ))
+        )
+        sms_code_page = (
+            '接收短信验证码' in body_text
+            and ('短信已发送' in body_text or sms_input_visible)
+        )
+        # 进入身份验证流程后，可见验证码框本身就是可靠信号。
+        return choose_method_page or sms_code_page or (
+            verification_announced and sms_input_visible
+        )
+
+    @classmethod
+    async def request_sms_verification(cls, page) -> None:
+        """在身份验证弹窗中选择接收短信验证码。"""
+        if not await cls._click_visible_text(page, ('接收短信验证码',)):
+            raise RuntimeError('未找到接收短信验证码入口')
+        await page.wait_for_timeout(700)
+        # 部分页面选择验证方式后还需再次点击获取验证码。
+        await cls._click_visible_text(page, (
+            '获取验证码',
+            '发送验证码',
+            '发送短信验证码',
+            '重新发送',
+        ))
+
+    @classmethod
+    async def resend_sms_verification(cls, page) -> None:
+        """在验证码输入页重新发送短信。"""
+        if not await cls._click_visible_text(page, (
+            '重新发送',
+            '重新获取',
+            '获取验证码',
+            '发送验证码',
+        )):
+            raise RuntimeError('未找到重新发送短信入口')
+
+    @classmethod
+    async def submit_sms_verification(cls, page, code: str) -> None:
+        """填写短信验证码并提交，调用方负责保证验证码格式有效。"""
+        try:
+            input_locator = await cls._find_visible_sms_input(page)
+        except Exception as error:
+            raise SmsVerificationInteractionError(
+                'QR_SMS_INPUT_LOOKUP_FAILED',
+                '短信验证码输入框定位失败，请重试',
+            ) from error
+        if input_locator is None:
+            raise SmsVerificationInteractionError(
+                'QR_SMS_INPUT_NOT_FOUND',
+                '未找到短信验证码输入框，请重试',
+            )
+
+        # 逐字符输入以触发 keydown/keyup，兼容依赖真实键盘事件的前端校验。
+        try:
+            try:
+                await input_locator.click()
+            except Exception:
+                # 遮罩层阻止鼠标点击时直接聚焦输入框。
+                await input_locator.evaluate('(input) => input.focus()')
+            try:
+                await input_locator.fill('')
+            except Exception:
+                await cls._set_input_dom_value(input_locator, '')
+            press_sequentially = getattr(input_locator, 'press_sequentially', None)
+            if press_sequentially is not None:
+                try:
+                    await press_sequentially(code, delay=80)
+                except Exception:
+                    try:
+                        await input_locator.fill('')
+                        await input_locator.type(code, delay=80)
+                    except Exception:
+                        await cls._set_input_dom_value(input_locator, code)
+            else:
+                try:
+                    # 兼容较旧 Playwright 版本。
+                    await input_locator.type(code, delay=80)
+                except Exception:
+                    await cls._set_input_dom_value(input_locator, code)
+            # 再同步一次受控组件状态，并只校验长度，不读取或记录验证码。
+            await cls._set_input_dom_value(input_locator, code)
+            value_length = await input_locator.evaluate(
+                'input => String(input.value || "").length'
+            )
+            if value_length != len(code):
+                raise RuntimeError('验证码未写入输入框')
+            await page.wait_for_timeout(150)
+        except Exception as error:
+            raise SmsVerificationInteractionError(
+                'QR_SMS_INPUT_FAILED',
+                '短信验证码输入失败，请重试',
+            ) from error
+
+        try:
+            submitted = await cls._click_second_verify_submit(page)
+            if not submitted:
+                submitted = await cls._click_known_sms_submit(page)
+            if not submitted:
+                submitted = await cls._click_enabled_button(page, (
+                    '确认',
+                    '验证',
+                    '提交',
+                    '下一步',
+                    '完成',
+                ))
+        except SmsVerificationInteractionError:
+            raise
+        except Exception as error:
+            raise SmsVerificationInteractionError(
+                'QR_SMS_BUTTON_CLICK_FAILED',
+                '短信验证按钮点击失败，请重试',
+            ) from error
+        if not submitted:
+            raise SmsVerificationInteractionError(
+                'QR_SMS_BUTTON_NOT_READY',
+                '短信验证按钮未启用或不可点击，请重试',
+            )
+
+    @staticmethod
+    async def capture_login_qrcode(
+            page,
+            timeout_seconds: float = 60.0,
+    ) -> bytes:
+        """在给定时间内等待二维码渲染，并仅在内存中返回截图。"""
+        timeout_ms = max(1, int(timeout_seconds * 1000))
+        try:
+            qrcode_handle = await page.wait_for_function('''() => {
+                const images = Array.from(document.querySelectorAll('article img'));
+                return images.find(image => {
+                    const rect = image.getBoundingClientRect();
+                    return rect.width >= 120 && rect.height >= 120
+                        && Math.abs(rect.width - rect.height) <= 8;
+                }) || false;
+            }''', timeout=timeout_ms)
+        except PlaywrightTimeoutError as error:
+            raise QrCodeNotFoundError('登录弹窗未出现二维码') from error
+        qrcode_image = qrcode_handle.as_element()
+        if not qrcode_image:
+            raise QrCodeNotFoundError('未找到登录二维码元素')
+
+        return await qrcode_image.screenshot()
+
+    @staticmethod
+    async def capture_debug_screenshot(page, screenshot_path: str | None) -> bool:
+        """覆盖保存登录页面调试截图，失败时不影响登录。"""
+        if not screenshot_path or page.is_closed():
+            return False
+        try:
+            screenshot_path = os.path.abspath(screenshot_path)
+            os.makedirs(os.path.dirname(screenshot_path), mode=0o700, exist_ok=True)
+            await page.screenshot(path=screenshot_path, full_page=True)
+            with suppress(OSError):
+                os.chmod(screenshot_path, 0o600)
+            return True
+        except Exception as error:
+            # 不记录页面内容，避免账号信息进入日志。
+            logger.warning('登录调试截图失败 error_type={}', error.__class__.__name__)
+            return False
+
+    @staticmethod
+    async def wait_and_click_login(
+            page,
+            deadline,
+            headless,
+            poll_interval=1.0,
+            debug_screenshot_path=None,
+            debug_screenshot_interval=5.0,
+    ):
         """可视模式等待人工通过验证，然后继续打开登录二维码。"""
         verification_logged = False
+        next_debug_screenshot = 0.0
         while time.time() < deadline:
             if page.is_closed():
                 raise RuntimeError('登录窗口已关闭')
             try:
+                if (
+                        debug_screenshot_path
+                        and time.monotonic() >= next_debug_screenshot
+                ):
+                    await DYLoginApi.capture_debug_screenshot(
+                        page,
+                        debug_screenshot_path,
+                    )
+                    next_debug_screenshot = (
+                        time.monotonic() + debug_screenshot_interval
+                    )
                 title = await page.title()
                 if '验证码中间页' in title:
                     if headless:
@@ -139,16 +629,10 @@ class DYLoginApi:
                         logger.warning('请在浏览器窗口中手工完成抖音验证码')
                         verification_logged = True
                 else:
-                    clicked = await page.evaluate('''() => {
-                        const nodes = Array.from(document.querySelectorAll('button, span, div, a'));
-                        const hit = nodes.find(
-                            n => ['登录','登 录'].includes((n.textContent||'').trim())
-                        );
-                        if (!hit) return false;
-                        hit.click();
-                        return true;
-                    }''')
+                    # 优先使用服务器页面中稳定的头部原生按钮结构。
+                    clicked = await DYLoginApi._click_login_entry(page)
                     if clicked:
+                        logger.info('登录入口已点击，等待二维码弹窗')
                         return
             except BrowserVerificationRequiredError:
                 raise
@@ -159,8 +643,12 @@ class DYLoginApi:
         raise TimeoutError('登录超时：未找到登录入口或未完成浏览器验证')
 
     # 扫码登录并抓 ticket
-    async def login_grab_ticket(self, headless=False, timeout=180, qrcode_path=None,
-                                qrcode_callback=None):
+    async def login_grab_ticket(self, headless=False, timeout=180,
+                                qrcode_callback=None,
+                                debug_screenshot_path=None,
+                                verification_callback=None,
+                                verification_command_queue=None,
+                                verification_timeout=180):
         """扫码登录并返回完整认证，二维码可通过 bytes 回调获取。"""
         async with async_playwright() as p:
             browser = await self._launch_browser(p, headless)
@@ -169,9 +657,33 @@ class DYLoginApi:
                 await page.goto(self.home_url)
                 await page.wait_for_load_state("load")
                 deadline = time.time() + timeout
-                await self.wait_and_click_login(page, deadline, headless)
-                if qrcode_path or qrcode_callback:
-                    qrcode_bytes = await self.capture_login_qrcode(page, qrcode_path)
+                await self.wait_and_click_login(
+                    page,
+                    deadline,
+                    headless,
+                    debug_screenshot_path=debug_screenshot_path,
+                )
+                if await self.capture_debug_screenshot(page, debug_screenshot_path):
+                    logger.info('登录调试截图已启用 path={}', debug_screenshot_path)
+                if qrcode_callback:
+                    try:
+                        # 二维码慢加载时使用扫码会话的全部剩余时间。
+                        qrcode_wait_seconds = max(1.0, deadline - time.time())
+                        logger.info(
+                            '等待二维码渲染 timeout_seconds={:.1f}',
+                            qrcode_wait_seconds,
+                        )
+                        qrcode_bytes = await self.capture_login_qrcode(
+                            page,
+                            timeout_seconds=qrcode_wait_seconds,
+                        )
+                    except Exception:
+                        # 二维码定位失败时保留当时页面，便于判断弹窗状态。
+                        await self.capture_debug_screenshot(
+                            page,
+                            debug_screenshot_path,
+                        )
+                        raise
                     await self._notify_qrcode(qrcode_callback, qrcode_bytes)
                 logger.info('扫码登录会话已就绪')
                 keys_str = None
@@ -179,10 +691,146 @@ class DYLoginApi:
                 cookies = {}
                 login_cookie_names = ('sessionid', 'sessionid_ss', 'sid_guard', 'uid_tt', 'uid_tt_ss')
                 is_logged_in = False
+                verification_announced = False
+                sms_submitted_at = None
+                next_debug_screenshot = time.monotonic() + 5.0
                 while time.time() < deadline:
                     await asyncio.sleep(2)
                     if page.is_closed():
                         raise RuntimeError("登录窗口已关闭")
+                    if (
+                            debug_screenshot_path
+                            and time.monotonic() >= next_debug_screenshot
+                    ):
+                        await self.capture_debug_screenshot(
+                            page,
+                            debug_screenshot_path,
+                        )
+                        next_debug_screenshot = time.monotonic() + 5.0
+
+                    body_text = await self._page_body_text(page)
+                    identity_verification = await self._is_identity_verification(
+                        page,
+                        body_text,
+                        verification_announced,
+                    )
+                    if identity_verification and not verification_announced:
+                        verification_announced = True
+                        # 短信交互开始后单独保留操作时间，不消耗剩余扫码时间。
+                        deadline = max(deadline, time.time() + verification_timeout)
+                        await self.capture_debug_screenshot(
+                            page,
+                            debug_screenshot_path,
+                        )
+                        await self._notify_verification(
+                            verification_callback,
+                            'verification_required',
+                        )
+
+                    command = None
+                    if verification_announced and verification_command_queue is not None:
+                        try:
+                            command = verification_command_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            pass
+                    if command:
+                        action = command.get('action')
+                        if action in {'request_sms', 'resend_sms'}:
+                            await self._notify_verification(
+                                verification_callback,
+                                'requesting_sms',
+                            )
+                            try:
+                                if action == 'resend_sms':
+                                    await self.resend_sms_verification(page)
+                                else:
+                                    await self.request_sms_verification(page)
+                            except Exception:
+                                await self._notify_verification(
+                                    verification_callback,
+                                    (
+                                        'waiting_sms_code'
+                                        if action == 'resend_sms'
+                                        else 'verification_required'
+                                    ),
+                                    (
+                                        'QR_SMS_RESEND_FAILED'
+                                        if action == 'resend_sms'
+                                        else 'QR_SMS_REQUEST_FAILED'
+                                    ),
+                                    (
+                                        '重新发送短信验证码失败，请重试'
+                                        if action == 'resend_sms'
+                                        else '请求短信验证码失败，请重试'
+                                    ),
+                                )
+                            else:
+                                await self.capture_debug_screenshot(
+                                    page,
+                                    debug_screenshot_path,
+                                )
+                                await self._notify_verification(
+                                    verification_callback,
+                                    'waiting_sms_code',
+                                )
+                        elif action == 'submit_sms':
+                            await self._notify_verification(
+                                verification_callback,
+                                'verifying_sms',
+                            )
+                            try:
+                                await self.submit_sms_verification(
+                                    page,
+                                    command.get('code', ''),
+                                )
+                            except SmsVerificationInteractionError as error:
+                                await self._notify_verification(
+                                    verification_callback,
+                                    'waiting_sms_code',
+                                    error.code,
+                                    error.safe_message,
+                                )
+                            except Exception:
+                                await self._notify_verification(
+                                    verification_callback,
+                                    'waiting_sms_code',
+                                    'QR_SMS_SUBMIT_FAILED',
+                                    '短信验证码提交失败，请重试',
+                                )
+                            else:
+                                sms_submitted_at = time.monotonic()
+
+                    sms_rejected = any(marker in body_text for marker in (
+                        '验证码错误',
+                        '验证码不正确',
+                        '验证码输入错误',
+                        '验证码有误',
+                        '验证码已过期',
+                        '验证码失效',
+                        '验证码已使用',
+                        '请重新获取验证码',
+                    ))
+                    verification_stalled = (
+                        sms_submitted_at is not None
+                        and identity_verification
+                        and time.monotonic() - sms_submitted_at >= 10
+                    )
+                    if sms_submitted_at is not None and (sms_rejected or verification_stalled):
+                        sms_submitted_at = None
+                        await self._notify_verification(
+                            verification_callback,
+                            'waiting_sms_code',
+                            (
+                                'QR_SMS_CODE_REJECTED'
+                                if sms_rejected
+                                else 'QR_SMS_VERIFICATION_STALLED'
+                            ),
+                            (
+                                '短信验证码错误或已失效，请重新输入'
+                                if sms_rejected
+                                else '短信验证未完成，请确认验证码后重试'
+                            ),
+                        )
                     try:
                         keys_str = await page.evaluate('localStorage["security-sdk/s_sdk_crypt_sdk"]')
                         web_protect_str = await page.evaluate(

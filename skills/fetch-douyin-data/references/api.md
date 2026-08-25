@@ -17,14 +17,16 @@
 | `accounts` | `GET /api/v1/douyin/auth/accounts` | None |
 | `login-start` | `POST /api/v1/douyin/auth/qr-sessions` | `account_id`: `^[a-z0-9][a-z0-9_-]{0,63}$` |
 | `login-status` | `GET /api/v1/douyin/auth/qr-sessions/{id}` | None |
+| `login-sms-request` | `POST /api/v1/douyin/auth/qr-sessions/{id}/sms/request` | None |
+| `login-sms-verify` | `POST /api/v1/douyin/auth/qr-sessions/{id}/sms/verify` | Hidden prompt: 4–8 digit code |
 | `login-cancel` | `DELETE /api/v1/douyin/auth/qr-sessions/{id}` | None |
 | `video-info` | `POST /api/v1/douyin/video_info` | `video_id` or `urls`: 1–20 HTTPS Douyin video URLs |
 | `video-comments` | `POST /api/v1/douyin/video_comments` | `url` or `video_id`, `cursor` ≥ 0, `count` 1–50 |
 | `video-sub-comments` | `POST /api/v1/douyin/video_sub_comments` | `video_id`, `comment_id`, `cursor` ≥ 0, `count` 1–50 |
-| `user-videos` | `POST /api/v1/douyin/user_videos` | `/user/{id}` URL or `video_id`, `page_num` 1–10 |
+| `user-videos` | `POST /api/v1/douyin/user_videos` | `/user/{id}` URL or `user_id` (sec_user_id), `page_num` 1–10 |
 | `search-videos` | `POST /api/v1/douyin/search_videos` | See search fields below |
 
-QR states are `starting`, `waiting_scan`, `committing`, `succeeded`, `expired`, `failed`, and `cancelled`. The creation response is the only response containing `qrcode_data_url`.
+QR states are `starting`, `waiting_scan`, `verification_required`, `requesting_sms`, `waiting_sms_code`, `verifying_sms`, `committing`, `succeeded`, `expired`, `failed`, and `cancelled`. The creation response is the only response containing `qrcode_data_url`. `login-wait` returns early for `verification_required` and `waiting_sms_code` because these states require user action.
 
 Search fields:
 

@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-import env_config
-from env_config import EnvironmentConfigurationError, get_app_env, load_environment
+from app import env_config
+from app.env_config import EnvironmentConfigurationError, get_app_env, load_environment
 
 
 @pytest.fixture(autouse=True)

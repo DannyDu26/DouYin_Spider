@@ -27,6 +27,14 @@ class DouyinAuthenticationError(RuntimeError):
     """抖音明确返回登录态失效。"""
 
 
+class DouyinRiskControlError(RuntimeError):
+    """抖音明确返回风控信号，仅保留脱敏的信号类型。"""
+
+    def __init__(self, signal: str):
+        super().__init__(signal)
+        self.signal = signal
+
+
 def _is_login_url(raw_url: str) -> bool:
     """仅识别明确的抖音登录域名或路径，避免误判普通 HTML。"""
     try:
@@ -46,6 +54,35 @@ def _is_login_url(raw_url: str) -> bool:
         (hostname == 'douyin.com' or hostname.endswith('.douyin.com'))
         and (path.startswith('/passport/') or path.startswith('/login') or path.startswith('/sso/'))
     )
+
+
+def _is_verification_url(raw_url: str) -> bool:
+    """识别抖音及字节系安全验证地址。"""
+    try:
+        parsed = urllib.parse.urlsplit(raw_url)
+    except (TypeError, ValueError):
+        return False
+    hostname = (parsed.hostname or '').lower()
+    path = parsed.path.lower()
+    verification_hosts = {
+        'verify.douyin.com',
+        'verify.snssdk.com',
+        'captcha.bytedance.com',
+    }
+    return hostname in verification_hosts or (
+        (hostname == 'douyin.com' or hostname.endswith('.douyin.com'))
+        and any(marker in path for marker in ('/verify', '/captcha', '/challenge'))
+    )
+
+
+def _response_redirects_to_verification(response) -> bool:
+    """检查最终地址和重定向链中的安全验证信号。"""
+    candidates = [getattr(response, 'url', '')]
+    for redirect in getattr(response, 'history', ()) or ():
+        location = (getattr(redirect, 'headers', {}) or {}).get('location', '')
+        if location:
+            candidates.append(urllib.parse.urljoin(getattr(redirect, 'url', ''), location))
+    return any(_is_verification_url(candidate) for candidate in candidates if candidate)
 
 
 def _response_redirects_to_login(response) -> bool:
@@ -73,8 +110,12 @@ def _extract_aweme_id(raw_url: str) -> str:
 
 def parse_douyin_response(response) -> dict:
     """解析响应，并保守识别账号认证失败。"""
+    if response.status_code == 429:
+        raise DouyinRiskControlError('http_429')
     if response.status_code in (401, 403):
         raise DouyinAuthenticationError(f'HTTP {response.status_code}')
+    if _response_redirects_to_verification(response):
+        raise DouyinRiskControlError('verification_redirect')
     if _response_redirects_to_login(response):
         raise DouyinAuthenticationError('上游重定向到登录页')
 
@@ -98,6 +139,27 @@ def parse_douyin_response(response) -> dict:
     )
     if status_code not in (None, 0, '0') and any(marker in message for marker in auth_markers):
         raise DouyinAuthenticationError('上游登录态失效')
+    # 2484 是搜索接口在频率受限时返回的稳定业务码。
+    risk_status_codes = (2484, '2484')
+    risk_markers = (
+        '访问过于频繁',
+        '请求过于频繁',
+        '操作频繁',
+        '安全验证',
+        '请完成验证',
+        '验证码',
+        '风控',
+        '反垃圾',
+        'antispam',
+        'too many requests',
+        'rate limit',
+        'captcha',
+    )
+    if status_code in risk_status_codes or (
+            status_code not in (None, 0, '0')
+            and any(marker in message for marker in risk_markers)
+    ):
+        raise DouyinRiskControlError('business_risk_signal')
     return data
 
 
@@ -625,6 +687,10 @@ class DouyinAPI:
         while True:
             res_json = DouyinAPI.search_general_work(auth, query, sort_type, publish_time, offset,
                                                      filter_duration, search_range, content_type)
+            status_code = res_json.get('status_code') if isinstance(res_json, dict) else None
+            if status_code not in (None, 0, '0'):
+                # 非风控业务错误由服务层统一转换为脱敏的 502。
+                raise ValueError('上游搜索返回非零业务码')
             page_data = res_json.get("data") if isinstance(res_json, dict) else None
             # 空页或异常页直接结束，避免 has_more 异常导致重复请求同一 offset
             if not isinstance(page_data, list) or not page_data:

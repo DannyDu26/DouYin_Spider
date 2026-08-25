@@ -198,7 +198,7 @@ class VideoSubCommentsRequest(BaseModel):
 class UserWorksRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={
         'examples': [{
-            'video_id': '7517981045911538959',
+            'user_id': 'MS4wLjABAAAA-example',
             'page_num': 1,
         }],
     })
@@ -208,13 +208,13 @@ class UserWorksRequest(BaseModel):
         description='抖音用户主页链接，路径格式必须为 /user/{id}。',
         examples=['https://www.douyin.com/user/MS4wLjABAAAA-example'],
     )
-    video_id: str | None = Field(
+    user_id: str | None = Field(
         default=None,
         min_length=1,
-        max_length=32,
-        pattern=r'^\d+$',
-        description='该用户任一作品的抖音作品 ID；与 user_url 二选一。',
-        examples=['7517981045911538959'],
+        max_length=128,
+        pattern=r'^[A-Za-z0-9._~-]+$',
+        description='用户主页 /user/{id} 路径中的用户 ID（sec_user_id）；与 user_url 二选一。',
+        examples=['MS4wLjABAAAA-example'],
     )
     page_num: int = Field(
         default=1,
@@ -236,9 +236,9 @@ class UserWorksRequest(BaseModel):
 
     @model_validator(mode='after')
     def validate_user_locator(self):
-        """用户主页链接和作品 ID 必须且只能提供一个。"""
-        if (self.user_url is None) == (self.video_id is None):
-            raise ValueError('user_url 和 video_id 必须且只能提供一个')
+        """用户主页链接和用户 ID 必须且只能提供一个。"""
+        if (self.user_url is None) == (self.user_id is None):
+            raise ValueError('user_url 和 user_id 必须且只能提供一个')
         return self
 
 
@@ -288,6 +288,13 @@ class SearchWorksRequest(BaseModel):
         default='0',
         description='内容类型：0 不限；1 视频；2 图文。',
     )
+    target_account_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r'^[a-z0-9][a-z0-9_-]*$',
+        description='仅供测试环境定向账号；需要显式启用测试账号固定开关。',
+    )
 
     @field_validator('query')
     @classmethod
@@ -313,4 +320,19 @@ class QrSessionRequest(BaseModel):
         pattern=r'^[a-z0-9][a-z0-9_-]*$',
         description='账号唯一标识，只允许小写字母、数字、下划线和连字符。',
         examples=['marketing-01'],
+    )
+
+
+class QrSmsCodeRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        'examples': [{'code': '123456'}],
+    })
+
+    # 兼容抖音可能下发的 4～8 位数字验证码。
+    code: str = Field(
+        min_length=4,
+        max_length=8,
+        pattern=r'^\d{4,8}$',
+        description='手机收到的短信验证码，仅允许 4～8 位数字。',
+        examples=['123456'],
     )

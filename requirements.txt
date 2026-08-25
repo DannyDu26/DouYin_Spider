@@ -7,7 +7,7 @@ httpx
 loguru
 openpyxl
 pillow
-playwright
+playwright==1.61.0
 protobuf3_to_dict
 PyMySQL
 python-dotenv

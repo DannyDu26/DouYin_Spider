@@ -6,8 +6,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.dialects import mysql
 from sqlalchemy.exc import SQLAlchemyError
 
-import account_store
-from account_store import (
+from app import account_store
+from app.account_store import (
     CredentialStoreConfigurationError,
     MySQLCredentialStore,
 )

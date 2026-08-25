@@ -19,7 +19,15 @@ from loguru import logger
 from dy_apis.login_api import BrowserVerificationRequiredError, DYLoginApi
 
 
-ACTIVE_STATUSES = frozenset({'starting', 'waiting_scan', 'committing'})
+ACTIVE_STATUSES = frozenset({
+    'starting',
+    'waiting_scan',
+    'verification_required',
+    'requesting_sms',
+    'waiting_sms_code',
+    'verifying_sms',
+    'committing',
+})
 TERMINAL_STATUSES = frozenset({'succeeded', 'expired', 'failed', 'cancelled'})
 ACCOUNT_ID_PATTERN = re.compile(r'^[a-z0-9_-]{1,64}$')
 _TRUE_VALUES = frozenset({'1', 'true', 'yes', 'on'})
@@ -72,6 +80,8 @@ class _QrSession:
     error_code: str | None = None
     error_message: str | None = None
     persistence_started: bool = False
+    # 页面操作必须留在 Playwright 所在任务内，通过队列传递指令。
+    verification_commands: asyncio.Queue = field(default_factory=asyncio.Queue)
     task: asyncio.Task | None = None
 
 
@@ -124,6 +134,7 @@ class QrLoginService:
             terminal_retention_seconds: int | None = None,
             qr_ready_timeout_seconds: int | None = None,
             persistence_timeout_seconds: float | None = None,
+            sms_verification_timeout_seconds: int | None = None,
             headless: bool | None = None,
     ):
         self.credential_store = credential_store
@@ -150,6 +161,24 @@ class QrLoginService:
             _positive_number_from_env('QR_PERSIST_TIMEOUT_SECONDS', 30.0)
             if persistence_timeout_seconds is None else persistence_timeout_seconds
         )
+        self.sms_verification_timeout_seconds = (
+            _positive_int_from_env('QR_SMS_VERIFICATION_TIMEOUT_SECONDS', 180)
+            if sms_verification_timeout_seconds is None
+            else sms_verification_timeout_seconds
+        )
+        self.debug_screenshot_enabled = _boolean_from_env(
+            'QR_DEBUG_SCREENSHOT_ENABLED',
+            False,
+        )
+        log_dir = os.getenv('LOG_DIR', '').strip() or os.path.join(
+            os.getcwd(),
+            'logs',
+        )
+        self.debug_screenshot_dir = (
+            os.path.abspath(os.path.join(log_dir, 'qr-debug'))
+            if self.debug_screenshot_enabled
+            else None
+        )
         if not isinstance(self.headless, bool):
             raise ValueError('headless 必须是布尔值')
 
@@ -158,6 +187,7 @@ class QrLoginService:
                 ('terminal_retention_seconds', self.terminal_retention_seconds),
                 ('qr_ready_timeout_seconds', self.qr_ready_timeout_seconds),
                 ('persistence_timeout_seconds', self.persistence_timeout_seconds),
+                ('sms_verification_timeout_seconds', self.sms_verification_timeout_seconds),
         ):
             if (
                     isinstance(value, bool)
@@ -267,6 +297,41 @@ class QrLoginService:
             session.account_id,
         )
 
+    async def _verification_updated(
+            self,
+            session: _QrSession,
+            status: str,
+            error_code: str | None = None,
+            error_message: str | None = None,
+    ) -> None:
+        """接收浏览器身份验证阶段变化，不记录验证码等敏感内容。"""
+        allowed_statuses = {
+            'verification_required',
+            'requesting_sms',
+            'waiting_sms_code',
+            'verifying_sms',
+        }
+        if status not in allowed_statuses:
+            raise ValueError('未知的身份验证状态')
+        async with self._lock:
+            if session.status in TERMINAL_STATUSES or session.persistence_started:
+                return
+            session.status = status
+            session.error_code = error_code
+            session.error_message = error_message
+            if status == 'verification_required':
+                # 二次验证出现后重新计算到期时间，给收取短信和输入留足时间。
+                sms_expires_at = self._now() + timedelta(
+                    seconds=self.sms_verification_timeout_seconds,
+                )
+                session.expires_at = max(session.expires_at, sms_expires_at)
+        logger.info(
+            '扫码登录身份验证状态变化 session_id={} account_id={} status={}',
+            session.session_id,
+            session.account_id,
+            status,
+        )
+
     async def _persist_and_activate(self, session: _QrSession, auth) -> None:
         payload = self._credential_payload(auth)
         # 数据库写入放到工作线程；内存更新保持无 await，关闭超时竞态窗口。
@@ -278,14 +343,30 @@ class QrLoginService:
         self.account_pool.upsert(session.account_id, auth, record)
 
     async def _run_session(self, session: _QrSession) -> None:
+        debug_screenshot_path = None
+        if self.debug_screenshot_dir:
+            # 每个会话只保留最新截图，避免调试文件持续增长。
+            debug_screenshot_path = os.path.join(
+                self.debug_screenshot_dir,
+                f'qr-login-{session.session_id}-latest.png',
+            )
         try:
             auth = await asyncio.wait_for(
                 self.login_api.login_grab_ticket(
                     headless=self.headless,
                     timeout=self.session_timeout_seconds,
                     qrcode_callback=lambda data: self._qrcode_ready(session, data),
+                    debug_screenshot_path=debug_screenshot_path,
+                    verification_callback=lambda status, code=None, message=None: (
+                        self._verification_updated(session, status, code, message)
+                    ),
+                    verification_command_queue=session.verification_commands,
+                    verification_timeout=self.sms_verification_timeout_seconds,
                 ),
-                timeout=self.session_timeout_seconds,
+                timeout=(
+                    self.session_timeout_seconds
+                    + self.sms_verification_timeout_seconds
+                ),
             )
         except asyncio.CancelledError:
             await self._set_terminal(
@@ -507,6 +588,63 @@ class QrLoginService:
             session = self._sessions.get(session_id)
             if session is None:
                 raise QrSessionNotFoundError(session_id)
+            return self._public_session(session)
+
+    async def request_sms_code(self, session_id: str) -> dict:
+        """通知当前浏览器页面选择短信校验并请求验证码。"""
+        async with self._lock:
+            self._purge_expired_sessions_locked(self._now())
+            session = self._sessions.get(session_id)
+            if session is None:
+                raise QrSessionNotFoundError(session_id)
+            if session.status not in {'verification_required', 'waiting_sms_code'}:
+                raise QrLoginServiceError(
+                    'QR_SMS_NOT_AVAILABLE',
+                    '当前扫码会话不允许请求短信验证码',
+                    409,
+                    session_id,
+                )
+            previous_status = session.status
+            session.status = 'requesting_sms'
+            session.error_code = None
+            session.error_message = None
+            action = (
+                'resend_sms'
+                if previous_status == 'waiting_sms_code'
+                else 'request_sms'
+            )
+            session.verification_commands.put_nowait({'action': action})
+            return self._public_session(session)
+
+    async def submit_sms_code(self, session_id: str, code: str) -> dict:
+        """将短信验证码安全传给当前浏览器页面。"""
+        if not isinstance(code, str) or not re.fullmatch(r'\d{4,8}', code):
+            raise QrLoginServiceError(
+                'INVALID_SMS_CODE',
+                '短信验证码必须是 4～8 位数字',
+                422,
+                session_id,
+            )
+        async with self._lock:
+            self._purge_expired_sessions_locked(self._now())
+            session = self._sessions.get(session_id)
+            if session is None:
+                raise QrSessionNotFoundError(session_id)
+            if session.status != 'waiting_sms_code':
+                raise QrLoginServiceError(
+                    'QR_SMS_CODE_NOT_EXPECTED',
+                    '当前扫码会话不在等待短信验证码',
+                    409,
+                    session_id,
+                )
+            session.status = 'verifying_sms'
+            session.error_code = None
+            session.error_message = None
+            # 验证码只存在于内存队列，不写日志和持久化存储。
+            session.verification_commands.put_nowait({
+                'action': 'submit_sms',
+                'code': code,
+            })
             return self._public_session(session)
 
     async def cancel_session(self, session_id: str) -> dict:

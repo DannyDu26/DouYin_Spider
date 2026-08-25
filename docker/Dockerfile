@@ -32,8 +32,8 @@ COPY . .
 
 # 创建生产环境日志目录，运行时可挂载到宿主机持久化
 RUN mkdir -p /data/logs/douyin-spider \
-    && sed -i 's/\r$//' /app/docker-entrypoint.sh \
-    && chmod +x /app/docker-entrypoint.sh
+    && sed -i 's/\r$//' /app/docker/docker-entrypoint.sh \
+    && chmod +x /app/docker/docker-entrypoint.sh
 
 EXPOSE 5000
 
@@ -44,4 +44,4 @@ ENV APP_ENV=prod \
     PYTHONUNBUFFERED=1
 
 # 显式启动虚拟显示，确保 Uvicorn 成为容器主进程。
-CMD ["/app/docker-entrypoint.sh"]
+CMD ["/app/docker/docker-entrypoint.sh"]

@@ -10,8 +10,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
 import main
-from account_pool import AccountPool, NoAvailableAccountError
-from account_store import (
+from app.account_pool import AccountPool, NoAvailableAccountError
+from app.account_store import (
     CredentialRecord,
     CredentialStoreError,
     MySQLCredentialStore,
@@ -19,7 +19,7 @@ from account_store import (
 )
 from builder.auth import DouyinAuth
 from dy_apis.douyin_api import DouyinAuthenticationError
-from spider_service import SpiderService, UpstreamServiceError
+from app.spider_service import SpiderService, UpstreamServiceError
 
 
 def make_auth(label: str) -> DouyinAuth:
@@ -169,6 +169,21 @@ def test_store_update_is_isolated_by_project_type_and_account():
     )
 
 
+def test_store_delete_credential_only_deletes_exact_snapshot():
+    store = make_store()
+    stale_record = store.insert('account-a', make_auth('old'))
+    updated_record = store.insert('account-a', make_auth('new'))
+    store.insert('account-b', make_auth('other'))
+
+    # 同一行已被扫码更新时，旧认证快照不得删除新凭证。
+    assert updated_record.row_id == stale_record.row_id
+    assert store.delete_credential(stale_record) is False
+    assert {record.account_id for record in store.load_latest()} == {'account-a', 'account-b'}
+
+    assert store.delete_credential(updated_record) is True
+    assert [record.account_id for record in store.load_latest()] == ['account-b']
+
+
 def test_store_isolates_accounts_by_fixed_project_id():
     """只加载项目 22，其他项目的同名账号不能覆盖当前凭证。"""
     store = make_store()
@@ -284,6 +299,124 @@ def test_pool_round_robin_and_cooldown_retry_after():
             pass
     assert error.value.retry_after_seconds == 300
     assert pool.stats()['cooling'] == 2
+
+
+def test_account_is_removed_after_configured_cooldowns_until_credential_refresh():
+    now = [1_700_000_000.0]
+    old_record = make_record(10, 'account-a', make_auth('old'))
+    pool = AccountPool(
+        [old_record],
+        cooldown_seconds=5,
+        cooldown_failure_limit=3,
+        clock=lambda: now[0],
+    )
+
+    for failure_count in range(1, 4):
+        pool.mark_risk_control('account-a', credential_id=old_record.row_id)
+        if failure_count < 3:
+            assert pool.list_accounts()[0]['status'] == 'cooling'
+            now[0] += 6
+            assert pool.list_accounts()[0]['status'] == 'available'
+
+    assert pool.list_accounts() == []
+    assert pool.stats()['total'] == 0
+    # 同一凭证不会被数据库定时刷新重新加入。
+    assert pool.refresh([old_record]) == 0
+    pool.upsert(old_record)
+    assert pool.list_accounts()[0]['status'] == 'available'
+
+    new_record = make_record(11, 'account-a', make_auth('new'))
+    assert pool.refresh([new_record]) == 1
+    assert pool.list_accounts()[0]['status'] == 'available'
+
+
+def test_zero_cooldown_failure_limit_disables_account_removal():
+    pool = AccountPool(
+        [make_record(1, 'account-a', make_auth('a'))],
+        cooldown_seconds=0,
+        cooldown_failure_limit=0,
+    )
+
+    for _ in range(5):
+        pool.mark_auth_failure('account-a', credential_id=1)
+
+    assert pool.stats() == {'total': 1, 'available': 1, 'cooling': 0, 'invalid': 0}
+
+
+def test_from_store_deletes_database_record_after_cooldown_limit():
+    store = make_store()
+    record = store.insert('account-a', make_auth('a'))
+    pool = AccountPool.from_store(
+        store,
+        max_concurrent_per_account=1,
+        cooldown_seconds=0,
+        cooldown_failure_limit=1,
+    )
+
+    with pool.acquire() as lease:
+        pool.mark_risk_control(lease.account_id, lease.row_id, lease.auth)
+
+    assert pool.list_accounts() == []
+    assert store.load_latest() == []
+
+
+def test_old_lease_cannot_remove_same_row_after_explicit_credential_update():
+    old_record = make_record(1, 'account-a', make_auth('old'))
+    pool = AccountPool([old_record], cooldown_failure_limit=1)
+    new_record = make_record(1, 'account-a', make_auth('new'))
+    pool.upsert(new_record)
+
+    assert pool.mark_risk_control('account-a', old_record.row_id, old_record.auth) is None
+    assert pool.list_accounts()[0]['status'] == 'available'
+
+
+def test_pool_can_acquire_specific_account_without_advancing_round_robin():
+    pool = AccountPool([
+        make_record(1, 'account-a', make_auth('a')),
+        make_record(2, 'account-b', make_auth('b')),
+    ])
+
+    with pool.acquire(account_id='account-b') as pinned:
+        assert pinned.account_id == 'account-b'
+        assert pinned.auth.label == 'b'
+    with pool.acquire() as normal:
+        assert normal.account_id == 'account-a'
+
+
+def test_pinned_authentication_failure_does_not_fail_over():
+    attempted = []
+
+    class ExpiredAPI:
+        def search_some_general_work(self, auth, *args):
+            attempted.append(auth.label)
+            raise DouyinAuthenticationError('expired')
+
+    class SearchRequest:
+        query = '测试'
+        limit = 1
+        sort_type = '0'
+        publish_time = '0'
+        filter_duration = ''
+        search_range = '0'
+        content_type = '0'
+        target_account_id = 'account-a'
+
+    pool = AccountPool([
+        make_record(1, 'account-a', make_auth('a')),
+        make_record(2, 'account-b', make_auth('b')),
+    ])
+    service = SpiderService(
+        account_pool=pool,
+        douyin_api=ExpiredAPI(),
+        test_account_pinning_enabled=True,
+    )
+
+    with pytest.raises(NoAvailableAccountError):
+        service.search_works(SearchRequest(), 'request-id')
+
+    assert attempted == ['a']
+    statuses = {item['account_id']: item['status'] for item in pool.list_accounts()}
+    assert statuses == {'account-a': 'cooling', 'account-b': 'available'}
 
 
 def test_account_list_never_contains_credentials():

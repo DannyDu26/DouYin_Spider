@@ -9,7 +9,7 @@ from pathlib import Path
 from dotenv import dotenv_values, load_dotenv
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 VALID_APP_ENVS = frozenset({'dev', 'prod'})
 
 

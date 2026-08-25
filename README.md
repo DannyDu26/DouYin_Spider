@@ -28,7 +28,7 @@
 
 main.py 是 FastAPI 服务入口。所有 API 抓取结果只通过 JSON 返回，运行进度和错误只输出到标准输出。
 
-legacy_cli.py 保留原项目的 Excel、媒体和详情文件落盘能力，只有显式执行该脚本时才会写文件。API 服务不会导入或调用旧版落盘函数。
+scripts/legacy_cli.py 保留原项目的 Excel、媒体和详情文件落盘能力，只有显式执行该脚本时才会写文件。API 服务不会导入或调用旧版落盘函数。
 
 底层仍保留直播、私信和其他抖音能力，但当前没有将这些能力开放为 HTTP 接口。
 
@@ -40,6 +40,8 @@ legacy_cli.py 保留原项目的 Excel、媒体和详情文件落盘能力，只
 | GET | /api/v1/douyin/auth/accounts | 账号别名及运行状态，不返回任何凭证 |
 | POST | /api/v1/douyin/auth/qr-sessions | 为指定账号创建扫码登录会话 |
 | GET | /api/v1/douyin/auth/qr-sessions/{session_id} | 查询扫码会话状态 |
+| POST | /api/v1/douyin/auth/qr-sessions/{session_id}/sms/request | 请求身份验证短信验证码 |
+| POST | /api/v1/douyin/auth/qr-sessions/{session_id}/sms/verify | 提交身份验证短信验证码 |
 | DELETE | /api/v1/douyin/auth/qr-sessions/{session_id} | 取消未完成的扫码会话 |
 | POST | /api/v1/douyin/video_info | 批量抓取 1–20 个作品 |
 | POST | /api/v1/douyin/video_comments | 分页抓取视频一级评论 |
@@ -215,7 +217,15 @@ xvfb-run -a -s "-screen 0 1280x960x24" \
   python -m uvicorn main:app --host 0.0.0.0 --port 5000 --workers 1
 ~~~
 
-服务启动后，按下一节创建扫码会话。创建响应中存在 `data.qrcode_data_url`，即表示 Xvfb、Chromium 和二维码截图链路均正常。若要作为后台服务运行，应将同一条 `xvfb-run` 命令写入 systemd 的 `ExecStart`，并继续保持单进程、单实例。
+服务启动后，按下一节创建扫码会话。创建响应中存在 `data.qrcode_data_url`，即表示 Xvfb、Chromium 和二维码提取链路均正常。若要作为后台服务运行，应将同一条 `xvfb-run` 命令写入 systemd 的 `ExecStart`，并继续保持单进程、单实例。
+
+扫码登录异常时，可临时开启页面调试截图：
+
+~~~dotenv
+QR_DEBUG_SCREENSHOT_ENABLED=true
+~~~
+
+开启后，每个会话会在整个登录流程中按 5 秒间隔覆盖保存最新页面。生产环境写入 `${LOG_DIR}/qr-debug/qr-login-<session_id>-latest.png`，未配置 `LOG_DIR` 时写入项目的 `logs/qr-debug`。截图可能包含账号信息和短信验证码；排查结束后应关闭开关并删除截图。
 
 常见问题：
 
@@ -240,7 +250,23 @@ curl -X POST "http://127.0.0.1:5000/api/v1/douyin/auth/qr-sessions" \
 curl "http://127.0.0.1:5000/api/v1/douyin/auth/qr-sessions/会话ID"
 ~~~
 
-可能的状态包括 starting、waiting_scan、committing、succeeded、expired、failed 和 cancelled。
+如果扫码后状态变为 `verification_required`，先在同一会话中请求短信验证码；已经处于 `waiting_sms_code` 时再次调用同一接口会重新发送：
+
+~~~bash
+curl -X POST \
+  "http://127.0.0.1:5000/api/v1/douyin/auth/qr-sessions/会话ID/sms/request"
+~~~
+
+轮询到 `waiting_sms_code` 后提交手机收到的 4～8 位数字验证码：
+
+~~~bash
+curl -X POST \
+  "http://127.0.0.1:5000/api/v1/douyin/auth/qr-sessions/会话ID/sms/verify" \
+  -H "Content-Type: application/json" \
+  -d '{"code":"123456"}'
+~~~
+
+提交后继续轮询，成功时状态为 `succeeded`。完整状态包括 starting、waiting_scan、verification_required、requesting_sms、waiting_sms_code、verifying_sms、committing、succeeded、expired、failed 和 cancelled。短信验证码只在登录任务内存中短暂传递，不会写入应用日志或数据库。
 
 取消扫码：
 
@@ -305,12 +331,12 @@ video_id 和 comment_id 必填。cursor 默认为 0，count 默认为 20、范�
 curl -X POST "http://127.0.0.1:5000/api/v1/douyin/user_videos" \
   -H "Content-Type: application/json" \
   -d '{
-    "video_id": "该用户任一作品ID",
+    "user_id": "用户主页路径中的用户ID",
     "page_num": 2
   }'
 ~~~
 
-video_id 与 user_url 二选一；传 video_id 时，服务会先从作品详情解析作者。page_num 默认 1，范围为 1–10。
+user_id 与 user_url 二选一；user_id 是用户主页 `/user/{id}` 路径中的 ID（即 sec_user_id）。page_num 默认 1，范围为 1–10。
 
 ### 搜索作品
 
@@ -373,6 +399,7 @@ curl -X POST "http://127.0.0.1:5000/api/v1/douyin/search_videos" \
 | HTTP 状态码 | 错误码 | 说明 |
 | --- | --- | --- |
 | 422 | INVALID_REQUEST | 请求字段或抖音链接校验失败 |
+| 429 | UPSTREAM_RISK_CONTROL | 上游返回明确的访问频率或安全验证信号 |
 | 502 | UPSTREAM_ERROR | 抖音上游网络或响应异常 |
 | 503 | NO_AVAILABLE_ACCOUNT | 没有有效账号或账号全部处于冷却状态 |
 | 500 | INTERNAL_ERROR | 未处理的服务内部异常 |
@@ -386,11 +413,11 @@ curl -X POST "http://127.0.0.1:5000/api/v1/douyin/search_videos" \
 - 定时刷新失败时保留现有账号继续服务，下一周期自动重试。
 - 刷新只接受更大的凭证 ID，避免并发扫码刚写入的新凭证被旧查询结果覆盖。
 - 可用账号按照内存游标轮询，单个抓取请求固定使用同一认证快照。
-- HTTP 401/403、明确登录失效响应或缺少必要登录 Cookie 才会使账号进入冷却。
+- HTTP 401/403、明确登录失效响应、缺少必要登录 Cookie 或明确风控信号会使账号进入冷却。
 - 内容不存在、参数问题和普通网络错误不会摘除账号。
 - 认证失败后最多选择另一个账号完整重试一次。
 - 成功抓取响应包含实际使用的 account_id 和 failover_count。
-- 账号运行状态只保存在当前进程内，不写回通用凭证表。
+- 冷却次数在当前进程内累计；达到配置阈值后移出账号池，并精确删除对应数据库凭证记录。
 
 ## 配置项
 
@@ -412,26 +439,30 @@ curl -X POST "http://127.0.0.1:5000/api/v1/douyin/search_videos" \
 | MYSQL_POOL_RECYCLE_SECONDS | 1800 | MySQL 连接回收时间 |
 | MAX_CONCURRENT_REQUESTS | 2 | 服务全局抓取并发 |
 | MAX_CONCURRENT_REQUESTS_PER_ACCOUNT | 1 | 单账号抓取并发 |
-| ACCOUNT_COOLDOWN_SECONDS | 300 | 认证失败冷却秒数 |
+| ENABLE_TEST_ACCOUNT_PINNING | false | 仅 dev 独立风控测试实例可定向搜索账号；生产强制关闭 |
+| ACCOUNT_COOLDOWN_SECONDS | 300 | 认证失败或明确风控后的冷却秒数 |
+| ACCOUNT_COOLDOWN_FAILURE_LIMIT | 3 | 同一凭证累计冷却达到该次数后移出账号池并删除对应数据库记录；0 表示关闭 |
 | ACCOUNT_ACQUIRE_TIMEOUT_SECONDS | 30 | 等待并发和账号槽位的秒数 |
 | ACCOUNT_REFRESH_INTERVAL_SECONDS | 300 | 从 MySQL 刷新账号池的间隔秒数 |
 | DOUYIN_CONNECT_TIMEOUT_SECONDS | 10 | 抖音连接超时 |
 | DOUYIN_READ_TIMEOUT_SECONDS | 30 | 抖音读取超时 |
 | DOUYIN_CA_BUNDLE | 系统 CA | 企业代理使用的受信 CA |
 | QR_SESSION_TIMEOUT_SECONDS | 180 | 扫码会话有效期 |
+| QR_SMS_VERIFICATION_TIMEOUT_SECONDS | 180 | 进入短信身份验证后重新保留的操作时间 |
 | QR_SESSION_RETENTION_SECONDS | 300 | 终态会话内存保留时间 |
 | QR_PERSIST_TIMEOUT_SECONDS | 30 | 凭证持久化慢请求告警阈值 |
+| QR_DEBUG_SCREENSHOT_ENABLED | false | 是否覆盖保存扫码登录页面调试截图 |
 | PLAYWRIGHT_BROWSER_CHANNEL | 未设置 | 可选浏览器通道，如 chrome |
-| QR_LOGIN_HEADLESS | dev=false、prod=true | 是否无界面启动扫码浏览器；本地可视模式支持人工处理验证码 |
+| QR_LOGIN_HEADLESS | false | 是否无界面启动扫码浏览器；Xvfb 环境应设置为 false |
 
-生产环境禁止 MYSQL_SSL_DISABLED=true，并要求远程 MySQL 配置 MYSQL_SSL_CA。实际 .env.dev、.env.prod、CA、证书和私钥不应提交到仓库。
+远程 MySQL 可配置 CA 启用 TLS，或在可信内网显式设置 `MYSQL_SSL_DISABLED=true`。实际 .env.dev、.env.prod、CA、证书和私钥不应提交到仓库。
 
 ## Docker 部署
 
 Docker 镜像会安装 Playwright Chromium、Xvfb 和 X11 诊断工具，并通过虚拟显示以可视浏览器模式启动单 worker Uvicorn：
 
 ~~~bash
-docker build -t douyin-spider-api .
+docker build -f docker/Dockerfile -t douyin-spider-api .
 
 docker run -d \
   --name douyin-spider \
@@ -455,6 +486,8 @@ docker exec douyin-spider pgrep -a Xvfb
 当前账号轮询游标、冷却状态和扫码会话均保存在进程内，因此部署时必须保持单 Uvicorn worker、单实例。多实例共享状态不在当前版本范围内。
 
 ## 本地测试
+
+单账号关键词搜索并发测试请参阅 [单账号关键词搜索并发风控测试方案](docs/单账号关键词搜索并发风控测试方案.md)。该测试必须使用只包含一个已授权测试账号的独立实例。
 
 Mock 自动化测试不需要连接真实 MySQL 或抖音：
 
@@ -484,10 +517,10 @@ python -m pytest -q
 2. 显式执行：
 
 ~~~bash
-python legacy_cli.py
+python -m scripts.legacy_cli
 ~~~
 
-DY_COOKIES、DY_TICKET、DY_TS_SIGN、DY_CLIENT_CERT 和 DY_PRIVATE_KEY 仅供 legacy_cli.py 使用，FastAPI 不读取或更新这些变量。
+DY_COOKIES、DY_TICKET、DY_TS_SIGN、DY_CLIENT_CERT 和 DY_PRIVATE_KEY 仅供 scripts/legacy_cli.py 使用，FastAPI 不读取或更新这些变量。
 
 ## 安全与部署说明
 
@@ -503,14 +536,15 @@ DY_COOKIES、DY_TICKET、DY_TS_SIGN、DY_CLIENT_CERT 和 DY_PRIVATE_KEY 仅供 l
 | 路径 | 用途 |
 | --- | --- |
 | main.py | FastAPI 应用、路由和统一异常处理 |
-| api_schemas.py | API 请求模型和参数校验 |
-| spider_service.py | 无落盘抓取服务层及账号故障切换 |
-| account_pool.py | 多账号轮询、冷却和单账号并发控制 |
-| account_store.py | MySQL 凭证读取、校验和保存更新 |
-| qr_login_service.py | 扫码会话生命周期与凭证提交 |
-| env_config.py | dev、prod 和自定义环境文件加载 |
+| app/api_schemas.py | API 请求模型和参数校验 |
+| app/spider_service.py | 无落盘抓取服务层及账号故障切换 |
+| app/account_pool.py | 多账号轮询、冷却和单账号并发控制 |
+| app/account_store.py | MySQL 凭证读取、校验和保存更新 |
+| app/qr_login_service.py | 扫码会话生命周期与凭证提交 |
+| app/env_config.py | dev、prod 和自定义环境文件加载 |
 | dy_apis/ | 原有抖音底层 API 能力 |
-| legacy_cli.py | 显式旧版落盘入口 |
+| scripts/legacy_cli.py | 显式旧版落盘入口 |
+| docs/ | 项目业务与补充文档 |
 | tests/ | Mock API、账号池、扫码和配置测试 |
 
 ## 🙏 致谢

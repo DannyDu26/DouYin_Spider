@@ -7,13 +7,15 @@ import math
 import os
 import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
-from account_store import CredentialRecord, MySQLCredentialStore, validate_account_id
+from loguru import logger
+
+from app.account_store import CredentialRecord, MySQLCredentialStore, validate_account_id
 
 
 AVAILABLE = 'available'
@@ -61,6 +63,16 @@ def _positive_int_from_env(name: str, default: int) -> int:
     return value
 
 
+def _non_negative_int_from_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError as error:
+        raise RuntimeError(f'{name} 必须是非负整数') from error
+    if value < 0:
+        raise RuntimeError(f'{name} 必须是非负整数')
+    return value
+
+
 def _non_negative_float_from_env(name: str, default: float) -> float:
     try:
         value = float(os.getenv(name, str(default)))
@@ -91,17 +103,25 @@ class AccountPool:
         records: Iterable[CredentialRecord] = (),
         max_concurrent_per_account: int = 1,
         cooldown_seconds: float = 300,
+        cooldown_failure_limit: int = 3,
+        credential_remover: Callable[[CredentialRecord], bool] | None = None,
         clock=None,
     ):
         if max_concurrent_per_account <= 0:
             raise ValueError('max_concurrent_per_account 必须是正整数')
         if cooldown_seconds < 0:
             raise ValueError('cooldown_seconds 必须是非负数')
+        if cooldown_failure_limit < 0:
+            raise ValueError('cooldown_failure_limit 必须是非负整数')
         self.max_concurrent_per_account = max_concurrent_per_account
         self.cooldown_seconds = float(cooldown_seconds)
+        self.cooldown_failure_limit = cooldown_failure_limit
+        self._credential_remover = credential_remover
         self._clock = clock or time.time
         self._condition = threading.Condition(threading.RLock())
         self._accounts: dict[str, _AccountState] = {}
+        # 记录已移除的凭证版本，避免定时刷新重新加入同一失效凭证。
+        self._removed_credentials: dict[str, int] = {}
         self._cursor = 0
         for record in records:
             self._upsert_record(record)
@@ -112,6 +132,7 @@ class AccountPool:
         store: MySQLCredentialStore,
         max_concurrent_per_account: int | None = None,
         cooldown_seconds: float | None = None,
+        cooldown_failure_limit: int | None = None,
     ) -> 'AccountPool':
         """加载数据库最新版本并创建运行时账号池。"""
         if max_concurrent_per_account is None:
@@ -120,13 +141,21 @@ class AccountPool:
             )
         if cooldown_seconds is None:
             cooldown_seconds = _non_negative_float_from_env('ACCOUNT_COOLDOWN_SECONDS', 300)
+        if cooldown_failure_limit is None:
+            cooldown_failure_limit = _non_negative_int_from_env(
+                'ACCOUNT_COOLDOWN_FAILURE_LIMIT', 3
+            )
         return cls(
             store.load_latest(),
             max_concurrent_per_account=max_concurrent_per_account,
             cooldown_seconds=cooldown_seconds,
+            cooldown_failure_limit=cooldown_failure_limit,
+            credential_remover=getattr(store, 'delete_credential', None),
         )
 
     def _upsert_record(self, record: CredentialRecord) -> None:
+        # 显式写入来自扫码提交，可恢复更新了同一数据库行的凭证。
+        self._removed_credentials.pop(record.account_id, None)
         state = self._accounts.get(record.account_id)
         if state is None:
             self._accounts[record.account_id] = _AccountState(
@@ -179,6 +208,12 @@ class AccountPool:
             for record in records:
                 state = self._accounts.get(record.account_id)
                 if state is None:
+                    removed_credential_id = self._removed_credentials.get(record.account_id)
+                    if removed_credential_id is not None:
+                        if record.row_id <= removed_credential_id:
+                            continue
+                        # 更高版本凭证视为重新登录成功，可以恢复账号。
+                        self._removed_credentials.pop(record.account_id, None)
                     self._accounts[record.account_id] = _AccountState(
                         record=record,
                         semaphore=threading.BoundedSemaphore(self.max_concurrent_per_account),
@@ -233,6 +268,7 @@ class AccountPool:
         self,
         excluded: set[str],
         timeout: float | None,
+        account_id: str | None = None,
     ) -> tuple[AccountLease, _AccountState]:
         if timeout is not None and timeout < 0:
             raise ValueError('timeout 不能为负数')
@@ -241,21 +277,25 @@ class AccountPool:
         with self._condition:
             while True:
                 now = self._clock()
-                account_ids = list(self._accounts)
+                # 指定账号时只等待该账号的槽位，禁止悄悄切换到其他账号。
+                account_ids = [account_id] if account_id is not None else list(self._accounts)
                 available_but_busy = False
                 if account_ids:
-                    start = self._cursor % len(account_ids)
+                    start = 0 if account_id is not None else self._cursor % len(account_ids)
                     for offset in range(len(account_ids)):
                         index = (start + offset) % len(account_ids)
-                        account_id = account_ids[index]
-                        state = self._accounts[account_id]
-                        if account_id in excluded or self._status(state, now) != AVAILABLE:
+                        selected_account_id = account_ids[index]
+                        state = self._accounts.get(selected_account_id)
+                        if state is None:
+                            continue
+                        if selected_account_id in excluded or self._status(state, now) != AVAILABLE:
                             continue
                         if state.semaphore.acquire(blocking=False):
-                            self._cursor = (index + 1) % len(account_ids)
+                            if account_id is None:
+                                self._cursor = (index + 1) % len(account_ids)
                             record = state.record
                             return AccountLease(
-                                account_id=account_id,
+                                account_id=selected_account_id,
                                 auth=record.auth,
                                 row_id=record.row_id,
                                 created_at=record.created_at,
@@ -277,9 +317,16 @@ class AccountPool:
         self,
         exclude: str | Iterable[str] | None = None,
         timeout: float | None = None,
+        account_id: str | None = None,
     ) -> Iterator[AccountLease]:
         """租用一个账号；上下文退出时自动释放账号级并发槽位。"""
-        lease, state = self._take_lease(self._normalize_excluded(exclude), timeout)
+        if account_id is not None:
+            validate_account_id(account_id)
+        lease, state = self._take_lease(
+            self._normalize_excluded(exclude),
+            timeout,
+            account_id=account_id,
+        )
         try:
             yield lease
         finally:
@@ -291,18 +338,70 @@ class AccountPool:
         self,
         account_id: str,
         credential_id: int | None = None,
+        credential_auth: Any = None,
     ) -> datetime | None:
         """仅冷却发生失败的凭证版本，避免误伤刚刷新的账号。"""
+        removed_record = None
         with self._condition:
             state = self._accounts.get(account_id)
             if state is None:
+                removed_credential_id = self._removed_credentials.get(account_id)
+                # 并发旧租约可能在账号移除后才上报失败，保持幂等即可。
+                if (
+                        removed_credential_id is not None
+                        and credential_id is not None
+                        and credential_id <= removed_credential_id
+                ):
+                    return None
                 raise KeyError(account_id)
             if credential_id is not None and state.record.row_id != credential_id:
                 return None
+            # 数据库更新可能复用行 ID，认证对象也必须仍是同一租约快照。
+            if credential_auth is not None and state.record.auth is not credential_auth:
+                return None
             state.failure_count += 1
             state.cooldown_until = self._clock() + self.cooldown_seconds
+            cooldown_until = state.cooldown_until
+            if (
+                    self.cooldown_failure_limit > 0
+                    and state.failure_count >= self.cooldown_failure_limit
+            ):
+                # 只移除当前凭证版本；更高版本凭证仍可重新入池。
+                removed_record = state.record
+                self._removed_credentials[account_id] = state.record.row_id
+                del self._accounts[account_id]
+                if self._accounts:
+                    self._cursor %= len(self._accounts)
+                else:
+                    self._cursor = 0
             self._condition.notify_all()
-            return datetime.fromtimestamp(state.cooldown_until, tz=timezone.utc)
+        if removed_record is not None and self._credential_remover is not None:
+            try:
+                deleted = self._credential_remover(removed_record)
+                logger.info(
+                    '账号达到冷却阈值，数据库凭证删除完成 account_id={} credential_id={} deleted={}',
+                    removed_record.account_id,
+                    removed_record.row_id,
+                    deleted,
+                )
+            except Exception as error:
+                # 内存墓碑继续阻止旧凭证回池，数据库异常不覆盖原始风控响应。
+                logger.error(
+                    '账号达到冷却阈值，但数据库凭证删除失败 account_id={} credential_id={} error_type={}',
+                    removed_record.account_id,
+                    removed_record.row_id,
+                    error.__class__.__name__,
+                )
+        return datetime.fromtimestamp(cooldown_until, tz=timezone.utc)
+
+    def mark_risk_control(
+        self,
+        account_id: str,
+        credential_id: int | None = None,
+        credential_auth: Any = None,
+    ) -> datetime | None:
+        """风控只冷却实际使用的账号，沿用统一冷却窗口。"""
+        return self.mark_auth_failure(account_id, credential_id, credential_auth)
 
     def retry_after_seconds(self) -> int | None:
         """返回任一冷却账号最早恢复所需秒数。"""

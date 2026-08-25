@@ -9,8 +9,8 @@ from urllib.parse import parse_qs, urlsplit
 
 from loguru import logger
 
-from account_pool import NoAvailableAccountError
-from dy_apis.douyin_api import DouyinAPI, DouyinAuthenticationError
+from app.account_pool import NoAvailableAccountError
+from dy_apis.douyin_api import DouyinAPI, DouyinAuthenticationError, DouyinRiskControlError
 from utils.data_util import handle_work_info
 
 
@@ -21,6 +21,10 @@ class UpstreamServiceError(RuntimeError):
         super().__init__(message)
         self.message = message
         self.details = details
+
+
+class AccountPinningDisabledError(RuntimeError):
+    """服务未启用测试账号定向能力。"""
 
 
 @dataclass(frozen=True)
@@ -41,12 +45,19 @@ class _StaticAccountPool:
         self.auth = auth
 
     @contextmanager
-    def acquire(self, exclude=None, timeout=None):
-        if self.auth is None or 'default' in (exclude or set()):
+    def acquire(self, exclude=None, timeout=None, account_id=None):
+        if (
+                self.auth is None
+                or 'default' in (exclude or set())
+                or account_id not in (None, 'default')
+        ):
             raise NoAvailableAccountError()
         yield _StaticLease('default', self.auth)
 
-    def mark_auth_failure(self, account_id, credential_id=None):
+    def mark_auth_failure(self, account_id, credential_id=None, credential_auth=None):
+        return None
+
+    def mark_risk_control(self, account_id, credential_id=None, credential_auth=None):
         return None
 
     def retry_after_seconds(self):
@@ -78,6 +89,7 @@ class SpiderService:
             douyin_api=None,
             account_pool=None,
             account_acquire_timeout_seconds: float | None = None,
+            test_account_pinning_enabled: bool | None = None,
     ):
         if max_concurrent <= 0:
             raise ValueError('max_concurrent 必须是正整数')
@@ -91,6 +103,11 @@ class SpiderService:
         self.account_acquire_timeout_seconds = float(account_acquire_timeout_seconds)
         self.douyin_api = douyin_api or DouyinAPI()
         self.account_pool = account_pool or _StaticAccountPool(auth)
+        if test_account_pinning_enabled is None:
+            test_account_pinning_enabled = self._boolean_from_env(
+                'ENABLE_TEST_ACCOUNT_PINNING', False
+            )
+        self.test_account_pinning_enabled = bool(test_account_pinning_enabled)
         # 全局闸门限制服务总并发，账号池另行限制单账号并发
         self._semaphore = threading.BoundedSemaphore(max_concurrent)
 
@@ -104,6 +121,19 @@ class SpiderService:
         if not math.isfinite(value) or value <= 0:
             raise RuntimeError(f'{name} 必须是有限正数')
         return value
+
+    @staticmethod
+    def _boolean_from_env(name: str, default: bool) -> bool:
+        """读取显式布尔开关，避免非空字符串被误判为开启。"""
+        raw_value = os.getenv(name)
+        if raw_value is None:
+            return default
+        normalized = raw_value.strip().lower()
+        if normalized in {'1', 'true', 'yes', 'on'}:
+            return True
+        if normalized in {'0', 'false', 'no', 'off'}:
+            return False
+        raise RuntimeError(f'{name} 必须是布尔值')
 
     @staticmethod
     def _safe_error(error: Exception) -> str:
@@ -128,18 +158,29 @@ class SpiderService:
         getter = getattr(self.account_pool, 'retry_after_seconds', None)
         return getter() if callable(getter) else None
 
-    def _execute_with_failover(self, operation, request_id: str) -> dict:
+    def _execute_with_failover(
+            self,
+            operation,
+            request_id: str,
+            target_account_id: str | None = None,
+    ) -> dict:
+        if target_account_id is not None and not self.test_account_pinning_enabled:
+            raise AccountPinningDisabledError()
         excluded = set()
         acquired = self._semaphore.acquire(timeout=self.account_acquire_timeout_seconds)
         if not acquired:
             raise NoAvailableAccountError()
         try:
-            for failover_count in range(2):
+            max_attempts = 1 if target_account_id is not None else 2
+            for failover_count in range(max_attempts):
                 try:
-                    with self.account_pool.acquire(
-                            exclude=excluded,
-                            timeout=self.account_acquire_timeout_seconds,
-                    ) as lease:
+                    acquire_kwargs = {
+                        'exclude': excluded,
+                        'timeout': self.account_acquire_timeout_seconds,
+                    }
+                    if target_account_id is not None:
+                        acquire_kwargs['account_id'] = target_account_id
+                    with self.account_pool.acquire(**acquire_kwargs) as lease:
                         try:
                             result = operation(lease.auth)
                         except DouyinAuthenticationError:
@@ -147,6 +188,7 @@ class SpiderService:
                             cooldown_until = self.account_pool.mark_auth_failure(
                                 lease.account_id,
                                 lease.credential_id,
+                                lease.auth,
                             )
                             if cooldown_until is not None:
                                 excluded.add(lease.account_id)
@@ -158,9 +200,15 @@ class SpiderService:
                                 cooldown_until is not None,
                                 failover_count,
                             )
-                            if failover_count == 1:
+                            if target_account_id is not None or failover_count == max_attempts - 1:
                                 raise NoAvailableAccountError(self._pool_retry_after())
                             continue
+                        except DouyinRiskControlError:
+                            # 风控只标记实际租用账号，避免账号池继续分配该账号。
+                            marker = getattr(self.account_pool, 'mark_risk_control', None)
+                            if callable(marker):
+                                marker(lease.account_id, lease.credential_id, lease.auth)
+                            raise
                 except NoAvailableAccountError as error:
                     if error.retry_after_seconds is not None:
                         raise
@@ -188,7 +236,7 @@ class SpiderService:
                     item = handle_work_info(detail)
                     items.append(item)
                     logger.info('[{}] 抓取作品成功 url={}', request_id, safe_work_url)
-                except DouyinAuthenticationError:
+                except (DouyinAuthenticationError, DouyinRiskControlError):
                     raise
                 except Exception as error:
                     error_type = self._safe_error(error)
@@ -255,7 +303,7 @@ class SpiderService:
                 else:
                     raise ValueError('上游评论分页标记格式错误')
                 items = [comment for comment in comments if isinstance(comment, dict)]
-            except DouyinAuthenticationError:
+            except (DouyinAuthenticationError, DouyinRiskControlError):
                 raise
             except Exception as error:
                 error_type = self._safe_error(error)
@@ -338,7 +386,7 @@ class SpiderService:
                 else:
                     raise ValueError('上游二级评论分页标记格式错误')
                 items = [reply for reply in comments if isinstance(reply, dict)]
-            except DouyinAuthenticationError:
+            except (DouyinAuthenticationError, DouyinRiskControlError):
                 raise
             except Exception as error:
                 error_type = self._safe_error(error)
@@ -380,21 +428,14 @@ class SpiderService:
             user_url: str | None,
             page_num: int,
             request_id: str,
-            video_id: str | None = None,
+            user_id: str | None = None,
     ) -> dict:
         def operation(auth):
             try:
                 resolved_user_url = user_url
                 if resolved_user_url is None:
-                    # 先通过作品详情解析作者 sec_uid，再查询作者主页作品。
-                    work_url = f'https://www.douyin.com/video/{video_id}'
-                    work_response = self.douyin_api.get_work_info(auth, work_url)
-                    work_detail = work_response.get('aweme_detail') if isinstance(work_response, dict) else None
-                    author = work_detail.get('author') if isinstance(work_detail, dict) else None
-                    sec_uid = author.get('sec_uid') if isinstance(author, dict) else None
-                    if not isinstance(sec_uid, str) or not sec_uid:
-                        raise ValueError('上游作品详情缺少作者 sec_uid')
-                    resolved_user_url = f'https://www.douyin.com/user/{sec_uid}'
+                    # 用户作品接口直接使用主页路径中的 sec_user_id。
+                    resolved_user_url = f'https://www.douyin.com/user/{user_id}'
 
                 user_response = self.douyin_api.get_user_info(auth, resolved_user_url)
                 user = user_response.get('user') if isinstance(user_response, dict) else None
@@ -418,14 +459,14 @@ class SpiderService:
                     item = handle_work_info(merged_work)
                     items.append(item)
                     logger.info('[{}] 抓取用户作品成功 url={}', request_id, item['work_url'])
-            except DouyinAuthenticationError:
+            except (DouyinAuthenticationError, DouyinRiskControlError):
                 raise
             except Exception as error:
                 error_type = self._safe_error(error)
                 logger.error(
                     '[{}] 抓取用户作品失败 url={} error={}',
                     request_id,
-                    self._safe_url_for_log(user_url or f'https://www.douyin.com/video/{video_id}'),
+                    self._safe_url_for_log(user_url or f'https://www.douyin.com/user/{user_id}'),
                     error_type,
                 )
                 raise UpstreamServiceError('用户作品抓取失败') from error
@@ -464,7 +505,7 @@ class SpiderService:
                     item = handle_work_info(aweme_info)
                     items.append(item)
                     logger.info('[{}] 搜索作品成功 url={}', request_id, item['work_url'])
-            except DouyinAuthenticationError:
+            except (DouyinAuthenticationError, DouyinRiskControlError):
                 raise
             except Exception as error:
                 error_type = self._safe_error(error)
@@ -484,10 +525,19 @@ class SpiderService:
             )
             return {'items': items, 'total': len(items), 'query': request_data.query}
 
-        return self._execute_with_failover(operation, request_id)
+        return self._execute_with_failover(
+            operation,
+            request_id,
+            target_account_id=getattr(request_data, 'target_account_id', None),
+        )
 
     def account_stats(self) -> dict:
         return self.account_pool.stats()
+
+    @property
+    def max_concurrent_per_account(self) -> int:
+        """返回账号池实际采用的单账号并发上限。"""
+        return int(getattr(self.account_pool, 'max_concurrent_per_account', self.max_concurrent))
 
     def list_accounts(self) -> list[dict]:
         return self.account_pool.list_accounts()
