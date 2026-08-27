@@ -244,7 +244,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     search = subparsers.add_parser("search-videos", help="搜索作品")
     search.add_argument("--query", required=True)
-    search.add_argument("--limit", type=int, default=20)
+    search.add_argument("--limit", type=int, default=25)
     search.add_argument("--sort-type", choices=["0", "1", "2"], default="0")
     search.add_argument("--publish-time", choices=["0", "1", "7", "180"], default="0")
     search.add_argument("--filter-duration", choices=["", "0-1", "1-5", "5-10000"], default="")

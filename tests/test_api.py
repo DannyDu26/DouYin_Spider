@@ -105,7 +105,11 @@ class FakeDouyinAPI:
 
     def search_some_general_work(self, *args):
         self.search_args = args
-        return [{'aweme_info': make_work('search-1')}]
+        return {
+            'items': [{'aweme_info': make_work('search-1')}],
+            'has_more': True,
+            'raw_page_counts': [25],
+        }
 
 
 @pytest.fixture
@@ -211,6 +215,9 @@ def test_search_default_example_does_not_pin_an_account():
     schema = SearchWorksRequest.model_json_schema()
 
     assert 'target_account_id' not in schema['examples'][0]
+    assert 'offset' not in schema['properties']
+    assert schema['examples'][0]['limit'] == 25
+    assert SearchWorksRequest(query='测试').limit == 25
 
 
 def test_search_account_pinning_is_forced_off_in_prod(fake_api, monkeypatch):
@@ -620,7 +627,16 @@ def test_search_works_passes_filters(client, fake_api):
     assert response.status_code == 200
     assert response.json()['data']['query'] == '榴莲'
     # 第一个参数为服务持有的 auth
-    assert fake_api.search_args[1:] == ('榴莲', 12, '2', '7', '1-5', '0', '1')
+    assert fake_api.search_args[1:] == ('榴莲', 12, '2', '7', '1-5', '0', '1', True)
+    assert response.json()['data'] == {
+        'items': [response.json()['data']['items'][0]],
+        'total': 1,
+        'query': '榴莲',
+        'has_more': True,
+        'raw_page_counts': [25],
+        'account_id': 'default',
+        'failover_count': 0,
+    }
 
 
 @pytest.mark.parametrize('query', ['正常词\n伪造日志', '正常词\x1b[31mERROR'])

@@ -484,7 +484,7 @@ class SpiderService:
     def search_works(self, request_data, request_id: str) -> dict:
         def operation(auth):
             try:
-                works = self.douyin_api.search_some_general_work(
+                search_result = self.douyin_api.search_some_general_work(
                     auth,
                     request_data.query,
                     request_data.limit,
@@ -493,7 +493,23 @@ class SpiderService:
                     request_data.filter_duration,
                     request_data.search_range,
                     request_data.content_type,
+                    True,
                 )
+                if isinstance(search_result, dict):
+                    works = search_result.get('items')
+                    has_more = search_result.get('has_more')
+                    raw_page_counts = search_result.get('raw_page_counts')
+                    if not isinstance(has_more, bool):
+                        raise ValueError('上游搜索 has_more 格式错误')
+                    if (not isinstance(raw_page_counts, list)
+                            or any(not isinstance(count, int) or isinstance(count, bool) or count < 0
+                                   for count in raw_page_counts)):
+                        raise ValueError('上游搜索每页原始数量格式错误')
+                else:
+                    # 兼容仍返回列表的旧版底层实现。
+                    works = search_result
+                    has_more = False
+                    raw_page_counts = []
                 if not isinstance(works, list):
                     raise ValueError('上游搜索列表格式错误')
 
@@ -523,7 +539,13 @@ class SpiderService:
                 len(request_data.query),
                 len(items),
             )
-            return {'items': items, 'total': len(items), 'query': request_data.query}
+            return {
+                'items': items,
+                'total': len(items),
+                'query': request_data.query,
+                'has_more': has_more,
+                'raw_page_counts': raw_page_counts,
+            }
 
         return self._execute_with_failover(
             operation,

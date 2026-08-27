@@ -1,6 +1,13 @@
 from builder.header import HeaderBuilder
 from utils.fingerprint import get_profile
-from utils.dy_util import generate_webid, generate_msToken, splice_url, generate_a_bogus, generate_fake_webid
+from utils.dy_util import (
+    generate_webid,
+    generate_msToken,
+    splice_url,
+    generate_a_bogus,
+    generate_a_bogus_bdms,
+    generate_fake_webid,
+)
 
 
 class Params:
@@ -47,13 +54,17 @@ class Params:
         self.params['webid'] = webid
         return self
 
-    def with_a_bogus(self, data=None):
+    def with_a_bogus(self, data=None, api_path=""):
         query = splice_url(self.get())
         if data is not None:
             data = splice_url(data)
         else:
             data = ''
-        abogus = generate_a_bogus(query, data)
+        if api_path:
+            # 二级评论使用 bdms JavaScript 签名。
+            abogus = generate_a_bogus_bdms(api_path, query, body=data or None)
+        else:
+            abogus = generate_a_bogus(query, data)
         self.add_param('a_bogus', abogus)
         return self
 

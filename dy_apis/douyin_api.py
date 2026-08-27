@@ -503,7 +503,7 @@ class DouyinAPI:
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
         params.add_param("msToken", auth.msToken)
-        params.with_a_bogus()
+        params.with_a_bogus(api_path=api)
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
                             params=params.get(), verify=get_douyin_tls_verify(),
                             timeout=get_douyin_http_timeout())
@@ -601,7 +601,7 @@ class DouyinAPI:
 
     @staticmethod
     def search_general_work(auth, query: str, sort_type: str = '0', publish_time: str = '0', offset: str = '0',
-                            filter_duration="", search_range="", content_type="", **kwargs):
+                            filter_duration="", search_range="", content_type="", search_id="", **kwargs):
         """
         搜索综合频道作品.
         :param auth: DouyinAuth object.
@@ -612,6 +612,7 @@ class DouyinAPI:
         :param filter_duration: 视频时长 空字符串 不限, 0-1 一分钟内, 1-5 1-5分钟内, 5-10000 5分钟以上
         :param search_range: 搜索范围 0 不限, 1 最近看过, 2 还未看过, 3 关注的人
         :param content_type: 内容形式 0 不限, 1 视频, 2 图文
+        :param search_id: 首屏响应返回的搜索会话 ID.
         :return: JSON数据.
         """
         api = f"/aweme/v1/web/general/search/single/"
@@ -629,13 +630,15 @@ class DouyinAPI:
                                                                                            filter_duration,
                                                                                            search_range, content_type))
         params.add_param("keyword", query)
-        params.add_param("search_source", "tab_search")
+        params.add_param("search_source", "normal_search" if search_id or offset != '0' else "tab_search")
         params.add_param("query_correct_type", "1")
         params.add_param("is_filter_search", "1")
         params.add_param("from_group_id", "")
         params.add_param("offset", offset)
         params.add_param("count", '25')
         params.add_param("need_filter_settings", '1' if offset == '0' else '0')
+        if search_id:
+            params.add_param("search_id", search_id)
         params.add_param("list_type", "single")
         params.add_param("update_version_code", "170400")
         params.add_param("pc_client_type", "1")
@@ -666,10 +669,27 @@ class DouyinAPI:
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
                             params=params.get(), verify=get_douyin_tls_verify(),
                             timeout=get_douyin_http_timeout())
-        return parse_douyin_response(resp)
+        json_data = parse_douyin_response(resp)
+        response_headers = getattr(resp, 'headers', {})
+        next_search_id = response_headers.get('X-Tt-Logid', '') if response_headers else ''
+        if isinstance(json_data, dict) and next_search_id:
+            # 搜索会话 ID 仅供内部翻页使用，不会透传到 HTTP API 响应。
+            json_data = dict(json_data)
+            json_data['_search_id'] = next_search_id
+        return json_data
 
     @staticmethod
-    def search_some_general_work(auth, query: str, num: int, sort_type: str, publish_time: str, filter_duration="", search_range="", content_type="", **kwargs) -> list:
+    def search_some_general_work(
+            auth,
+            query: str,
+            num: int,
+            sort_type: str,
+            publish_time: str,
+            filter_duration="",
+            search_range="",
+            content_type="",
+            include_pagination: bool = False,
+            **kwargs) -> list | dict:
         """
         搜索指定数量综合频道作品.
         :param auth: DouyinAuth object.
@@ -680,31 +700,57 @@ class DouyinAPI:
         :param filter_duration: 视频时长 空字符串 不限, 0-1 一分钟内, 1-5 1-5分钟内, 5-10000 5分钟以上
         :param search_range: 搜索范围 0 不限, 1 最近看过, 2 还未看过, 3 关注的人
         :param content_type: 内容形式 0 不限, 1 视频, 2 图文
-        :return: 作品列表.
+        :param include_pagination: 是否返回分页元数据.
+        :return: 作品列表，或包含作品和分页元数据的字典.
         """
-        offset = "0"
+        current_offset = 0
+        search_id = ""
         work_list = []
+        raw_page_counts = []
+        has_more = False
         while True:
-            res_json = DouyinAPI.search_general_work(auth, query, sort_type, publish_time, offset,
-                                                     filter_duration, search_range, content_type)
+            res_json = DouyinAPI.search_general_work(auth, query, sort_type, publish_time, str(current_offset),
+                                                     filter_duration, search_range, content_type,
+                                                     search_id=search_id)
             status_code = res_json.get('status_code') if isinstance(res_json, dict) else None
             if status_code not in (None, 0, '0'):
                 # 非风控业务错误由服务层统一转换为脱敏的 502。
                 raise ValueError('上游搜索返回非零业务码')
+            response_search_id = res_json.get('_search_id') if isinstance(res_json, dict) else None
+            if isinstance(response_search_id, str) and response_search_id:
+                search_id = response_search_id
             page_data = res_json.get("data") if isinstance(res_json, dict) else None
             # 空页或异常页直接结束，避免 has_more 异常导致重复请求同一 offset
-            if not isinstance(page_data, list) or not page_data:
+            if not isinstance(page_data, list):
+                has_more = False
                 break
-            works = [w for w in page_data if isinstance(w, dict) and w.get("aweme_info")]
-            work_list.extend(works)
-            if res_json["has_more"] != 1 or len(work_list) >= num:
+            raw_page_counts.append(len(page_data))
+            if not page_data:
+                has_more = False
                 break
-            next_offset = str(int(offset) + len(page_data))
-            if next_offset == offset:
+
+            upstream_has_more = res_json.get("has_more") == 1
+            page_end_offset = current_offset + len(page_data)
+            consumed_raw_count = len(page_data)
+            for index, raw_item in enumerate(page_data, start=1):
+                if isinstance(raw_item, dict) and raw_item.get("aweme_info"):
+                    work_list.append(raw_item)
+                if len(work_list) >= num:
+                    # 从最后一条已消费的原始结果继续，避免 limit 小于单页数量时漏数据。
+                    consumed_raw_count = index
+                    break
+
+            has_more = consumed_raw_count < len(page_data) or upstream_has_more
+            if len(work_list) >= num or not upstream_has_more:
                 break
-            offset = next_offset
-        if len(work_list) > num:
-            work_list = work_list[:num]
+            current_offset = page_end_offset
+
+        if include_pagination:
+            return {
+                'items': work_list,
+                'has_more': has_more,
+                'raw_page_counts': raw_page_counts,
+            }
         return work_list
 
     @staticmethod

@@ -39,6 +39,9 @@ Search fields:
 | `search_range` | `0` any, `1` viewed, `2` unseen, `3` followed users |
 | `content_type` | `0` any, `1` video, `2` image/text |
 
+Search always starts from the first page and follows upstream pages until `limit` is reached.
+Responses include `has_more` and `raw_page_counts`; the latter records each upstream page size.
+
 ## Response and errors
 
 Successful envelopes contain `success`, `request_id`, and `data`. Failed envelopes contain `success`, `request_id`, and `error` with a safe `code` and `message`. Preserve the request ID when reporting a failure.

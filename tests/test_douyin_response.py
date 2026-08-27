@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import dy_apis.douyin_api as douyin_module
+import utils.dy_util as dy_util_module
 from builder.params import Params
 from dy_apis.douyin_api import (
     DouyinAPI,
@@ -15,11 +16,12 @@ from dy_apis.douyin_api import (
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, payload=None, text=None, url='', history=None):
+    def __init__(self, status_code=200, payload=None, text=None, url='', history=None, headers=None):
         self.status_code = status_code
         self.text = json.dumps(payload or {}) if text is None else text
         self.url = url
         self.history = history or []
+        self.headers = headers or {}
 
 
 def test_http_authentication_failure_is_detected():
@@ -280,6 +282,57 @@ def test_reply_request_propagates_http_authentication_failure(monkeypatch, statu
         )
 
 
+def test_reply_request_selects_bdms_signer(monkeypatch):
+    """二级评论请求应显式选择 bdms 签名。"""
+    signer_calls = []
+
+    def fake_with_a_bogus(self, *args, **kwargs):
+        signer_calls.append(kwargs)
+        return self
+
+    monkeypatch.setattr(Params, 'with_web_id', lambda self, *args, **kwargs: self)
+    monkeypatch.setattr(Params, 'with_a_bogus', fake_with_a_bogus)
+    monkeypatch.setattr(
+        douyin_module.requests,
+        'get',
+        lambda *args, **kwargs: FakeResponse(
+            payload={'status_code': 0, 'comments': [], 'cursor': 0, 'has_more': 0},
+        ),
+    )
+    auth = SimpleNamespace(cookie={'s_v_web_id': 'fp'}, msToken='token')
+
+    DouyinAPI.get_work_inner_comment(
+        auth,
+        {'aweme_id': '123', 'cid': '789'},
+    )
+
+    assert signer_calls == [{'api_path': '/aweme/v1/web/comment/list/reply/'}]
+
+
+def test_bdms_signer_uses_last_87_characters(monkeypatch):
+    """bdms 签名只保留二级评论需要的末尾 87 个字符。"""
+    full_sign = 'prefix-' + 'x' * 87
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stdout = json.dumps({'a_bogus': full_sign})
+        stderr = ''
+
+    monkeypatch.setattr(dy_util_module.shutil, 'which', lambda name: 'node')
+    monkeypatch.setattr(
+        dy_util_module.subprocess,
+        'run',
+        lambda *args, **kwargs: FakeCompletedProcess(),
+    )
+
+    result = dy_util_module.generate_a_bogus_bdms(
+        '/aweme/v1/web/comment/list/reply/',
+        'aid=6383',
+    )
+
+    assert result == 'x' * 87
+
+
 def test_search_stops_after_empty_page_even_when_upstream_claims_more(monkeypatch):
     calls = []
 
@@ -291,3 +344,147 @@ def test_search_stops_after_empty_page_even_when_upstream_claims_more(monkeypatc
 
     assert DouyinAPI.search_some_general_work(object(), 'query', 20, '0', '0') == []
     assert len(calls) == 1
+    assert DouyinAPI.search_some_general_work(
+        object(),
+        'query',
+        20,
+        '0',
+        '0',
+        include_pagination=True,
+    ) == {
+        'items': [],
+        'has_more': False,
+        'raw_page_counts': [0],
+    }
+
+
+def test_search_automatically_carries_session_to_next_page(monkeypatch):
+    calls = []
+
+    def page_response(auth, query, sort_type, publish_time, offset, *args, **kwargs):
+        calls.append((offset, kwargs.get('search_id')))
+        if offset == '0':
+            return {
+                'status_code': 0,
+                'data': [{'card': str(index)} for index in range(25)],
+                'has_more': 1,
+                '_search_id': 'search-page-1',
+            }
+        return {
+            'status_code': 0,
+            'data': [{'aweme_info': {'aweme_id': '1'}}],
+            'has_more': 0,
+            '_search_id': 'search-page-2',
+        }
+
+    monkeypatch.setattr(DouyinAPI, 'search_general_work', page_response)
+
+    result = DouyinAPI.search_some_general_work(
+        object(),
+        'query',
+        20,
+        '0',
+        '0',
+    )
+
+    assert result == [{'aweme_info': {'aweme_id': '1'}}]
+    assert calls == [('0', ''), ('25', 'search-page-1')]
+
+
+def test_search_returns_pagination_metadata(monkeypatch):
+    responses = {
+        '0': {
+            'status_code': 0,
+            'data': [
+                {'aweme_info': {'aweme_id': '1'}},
+                {'card': 'filter'},
+            ],
+            'has_more': 1,
+            '_search_id': 'search-page-1',
+        },
+        '2': {
+            'status_code': 0,
+            'data': [{'aweme_info': {'aweme_id': '2'}}],
+            'has_more': 0,
+        },
+    }
+
+    def page_response(auth, query, sort_type, publish_time, offset, *args, **kwargs):
+        return responses[offset]
+
+    monkeypatch.setattr(DouyinAPI, 'search_general_work', page_response)
+
+    result = DouyinAPI.search_some_general_work(
+        object(),
+        'query',
+        50,
+        '0',
+        '0',
+        include_pagination=True,
+    )
+
+    assert result == {
+        'items': [
+            {'aweme_info': {'aweme_id': '1'}},
+            {'aweme_info': {'aweme_id': '2'}},
+        ],
+        'has_more': False,
+        'raw_page_counts': [2, 1],
+    }
+
+
+def test_search_limit_stops_inside_page_and_reports_more(monkeypatch):
+    def one_page(auth, query, sort_type, publish_time, offset, *args, **kwargs):
+        return {
+            'status_code': 0,
+            'data': [
+                {'card': 'filter'},
+                {'aweme_info': {'aweme_id': '1'}},
+                {'aweme_info': {'aweme_id': '2'}},
+            ],
+            'has_more': 0,
+        }
+
+    monkeypatch.setattr(DouyinAPI, 'search_general_work', one_page)
+
+    result = DouyinAPI.search_some_general_work(
+        object(),
+        'query',
+        1,
+        '0',
+        '0',
+        include_pagination=True,
+    )
+
+    assert result == {
+        'items': [{'aweme_info': {'aweme_id': '1'}}],
+        'has_more': True,
+        'raw_page_counts': [3],
+    }
+
+
+def test_general_search_carries_response_search_id_to_next_page(monkeypatch):
+    monkeypatch.setattr(Params, 'with_web_id', lambda self, *args, **kwargs: self)
+    monkeypatch.setattr(douyin_module, 'generate_a_bogus_pure', lambda *args: 'signed')
+    calls = []
+
+    def fake_get(*args, **kwargs):
+        calls.append(kwargs)
+        return FakeResponse(
+            payload={'status_code': 0, 'data': [], 'has_more': 0},
+            headers={'X-Tt-Logid': 'next-search-id'},
+        )
+
+    monkeypatch.setattr(douyin_module.requests, 'get', fake_get)
+    auth = SimpleNamespace(cookie={'s_v_web_id': 'fp'}, msToken='token')
+
+    response = DouyinAPI.search_general_work(
+        auth,
+        'query',
+        offset='25',
+        search_id='previous-search-id',
+    )
+
+    assert calls[0]['params']['search_source'] == 'normal_search'
+    assert calls[0]['params']['search_id'] == 'previous-search-id'
+    assert response['_search_id'] == 'next-search-id'

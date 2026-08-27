@@ -246,7 +246,7 @@ class SearchWorksRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={
         'examples': [{
             'query': '榴莲',
-            'limit': 20,
+            'limit': 25,
             'sort_type': '0',
             'publish_time': '0',
             'filter_duration': '',
@@ -262,11 +262,11 @@ class SearchWorksRequest(BaseModel):
         examples=['榴莲'],
     )
     limit: int = Field(
-        default=20,
+        default=25,
         ge=1,
         le=100,
-        description='最多返回的作品数量，范围为 1～100。',
-        examples=[20],
+        description='最多返回的作品数量，范围为 1～100，默认与上游单页数量一致为 25。',
+        examples=[25],
     )
     sort_type: Literal['0', '1', '2'] = Field(
         default='0',

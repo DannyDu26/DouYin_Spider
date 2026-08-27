@@ -345,7 +345,7 @@ curl -X POST "http://127.0.0.1:5000/api/v1/douyin/search_videos" \
   -H "Content-Type: application/json" \
   -d '{
     "query": "榴莲",
-    "limit": 20,
+    "limit": 25,
     "sort_type": "0",
     "publish_time": "0",
     "filter_duration": "",
@@ -356,12 +356,16 @@ curl -X POST "http://127.0.0.1:5000/api/v1/douyin/search_videos" \
 
 | 字段 | 允许值 |
 | --- | --- |
-| limit | 1–100，默认 20 |
+| limit | 1–100，默认 25 |
 | sort_type | 0 综合排序；1 最多点赞；2 最新发布 |
 | publish_time | 0 不限；1 一天内；7 一周内；180 半年内 |
 | filter_duration | 空字符串不限；0-1 一分钟内；1-5 一至五分钟；5-10000 五分钟以上 |
 | search_range | 0 不限；1 最近看过；2 还未看过；3 关注的人 |
 | content_type | 0 不限；1 视频；2 图文 |
+
+搜索接口始终从首屏开始，并根据 `limit` 自动翻页。响应中的 `has_more`
+表示达到 `limit` 后上游是否仍有更多结果，`raw_page_counts`
+按请求顺序记录每页上游返回的原始条数。
 
 ## 响应格式
 

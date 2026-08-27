@@ -5,7 +5,10 @@ import json
 import random
 import base64
 import urllib
+import shutil
+import subprocess
 from urllib.parse import urlsplit
+from pathlib import Path
 
 import requests
 from utils.fingerprint import get_profile
@@ -86,6 +89,7 @@ def generate_dynamic_msToken(ttwid=None, proxies=None):
 
 _pure_signer = None
 _xb_signer = None
+BDMS_A_BOGUS_TAIL_LENGTH = 87
 
 
 def _pure_sign():
@@ -107,6 +111,71 @@ def _xb_sign():
 def generate_a_bogus_pure(api_path, query):
     """a_bogus"""
     return _pure_sign().sign(f'https://www.douyin.com{api_path}?{query}')
+
+
+def generate_a_bogus_bdms(api_path, query, method="GET", body=None):
+    """调用项目内 bdms JavaScript 生成 a_bogus。"""
+    project_root = Path(__file__).resolve().parents[1]
+    script_path = project_root / "js" / "bdms_1.0.1.19_fix.js"
+    node_path = shutil.which("node")
+    if node_path is None:
+        raise RuntimeError("未找到 Node.js，无法生成 bdms a_bogus")
+    if not script_path.is_file():
+        raise FileNotFoundError(f"未找到 bdms 脚本: {script_path}")
+
+    payload = {
+        "api_path": api_path,
+        "query": query,
+        "method": method,
+    }
+    if body is not None:
+        payload["body"] = body
+    node_code = r"""
+const bdms = require(process.argv[1]);
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => { input += chunk; });
+process.stdin.on("end", () => {
+  try {
+    const payload = JSON.parse(input);
+    const url = "https://www.douyin.com" + payload.api_path + "?" + payload.query;
+    const options = { method: payload.method || "GET" };
+    if (Object.prototype.hasOwnProperty.call(payload, "body")) {
+      options.body = payload.body;
+    }
+    const aBogus = bdms.generateABogus(url, options);
+    process.stdout.write(JSON.stringify({ a_bogus: aBogus }));
+  } catch (error) {
+    process.stderr.write(error && error.stack ? error.stack : String(error));
+    process.exitCode = 1;
+  }
+});
+"""
+    try:
+        result = subprocess.run(
+            [node_path, "-e", node_code, str(script_path)],
+            input=json.dumps(payload, ensure_ascii=False),
+            text=True,
+            capture_output=True,
+            cwd=str(project_root),
+            timeout=15,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("bdms a_bogus 生成超时") from error
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "Node.js 执行失败"
+        raise RuntimeError(f"bdms a_bogus 生成失败: {detail}")
+    try:
+        signed = json.loads(result.stdout).get("a_bogus")
+    except (TypeError, json.JSONDecodeError) as error:
+        raise RuntimeError("bdms a_bogus 返回格式错误") from error
+    if not isinstance(signed, str) or not signed:
+        raise RuntimeError("bdms 未返回有效 a_bogus")
+    if len(signed) < BDMS_A_BOGUS_TAIL_LENGTH:
+        raise RuntimeError("bdms a_bogus 长度不足，无法提取末尾签名")
+    # 当前二级评论接口使用 bdms 输出的末尾 87 个字符。
+    return signed[-BDMS_A_BOGUS_TAIL_LENGTH:]
 
 
 
