@@ -10,6 +10,7 @@ from builder.params import Params
 from dy_apis.douyin_api import (
     DouyinAPI,
     DouyinAuthenticationError,
+    DouyinRequestRejectedError,
     DouyinRiskControlError,
     parse_douyin_response,
 )
@@ -129,7 +130,6 @@ def test_core_api_requests_use_timeout_and_verified_tls(monkeypatch, tmp_path):
     monkeypatch.setenv('DOUYIN_CA_BUNDLE', str(ca_bundle))
     monkeypatch.setattr(Params, 'with_web_id', lambda self, *args, **kwargs: self)
     monkeypatch.setattr(Params, 'with_a_bogus', lambda self, *args, **kwargs: self)
-    monkeypatch.setattr(douyin_module, 'generate_a_bogus_pure', lambda *args: 'signed')
 
     calls = []
 
@@ -179,6 +179,247 @@ def test_core_api_requests_use_timeout_and_verified_tls(monkeypatch, tmp_path):
     assert calls[4]['params']['comment_id'] == '789'
     assert calls[4]['params']['cursor'] == '4'
     assert calls[4]['params']['count'] == '9'
+
+
+def test_user_work_request_uses_compatible_signature(monkeypatch):
+    """用户作品请求应匹配已验证可用的脚本参数。"""
+    signer_calls = []
+    request_calls = []
+
+    def fake_with_a_bogus(self, *args, **kwargs):
+        signer_calls.append((kwargs, dict(self.get())))
+        self.add_param('a_bogus', 'full-bdms-signature')
+        return self
+
+    monkeypatch.setattr(Params, 'with_web_id', lambda self, *args, **kwargs: self)
+    monkeypatch.setattr(Params, 'with_a_bogus', fake_with_a_bogus)
+    monkeypatch.setattr(
+        douyin_module.requests,
+        'get',
+        lambda *args, **kwargs: (
+            request_calls.append(kwargs)
+            or FakeResponse(payload={
+                'status_code': 0,
+                'aweme_list': [],
+                'has_more': 0,
+            })
+        ),
+    )
+    auth = SimpleNamespace(
+        cookie={'s_v_web_id': 'fp', 'UIFID': 'account-uifid'},
+        msToken='token',
+    )
+
+    DouyinAPI.get_user_work_info(
+        auth,
+        'https://www.douyin.com/user/sec-user',
+        '0',
+    )
+
+    assert signer_calls[0][0] == {}
+    assert 'timestamp' not in signer_calls[0][1]
+    assert 'timestamp' not in request_calls[0]['params']
+    assert 'uifid' not in request_calls[0]['headers']
+
+
+def test_user_work_retries_transient_403_with_new_signatures(monkeypatch):
+    """用户作品偶发 403 时应优先重新签名，连续失败再刷新 token。"""
+    request_calls = []
+    signer_calls = []
+    sleeps = []
+
+    class RetryAuth:
+        cookie = {'s_v_web_id': 'fp'}
+
+        def __init__(self):
+            self.token_index = 1
+
+        @property
+        def msToken(self):
+            return f'token-{self.token_index}'
+
+        def refresh_mstoken(self):
+            self.token_index += 1
+            return self.msToken
+
+    def fake_with_a_bogus(self, *args, **kwargs):
+        signer_calls.append(dict(self.get()))
+        self.add_param('a_bogus', f'signed-{len(signer_calls)}')
+        return self
+
+    def fake_get(*args, **kwargs):
+        request_calls.append(kwargs)
+        if len(request_calls) < 3:
+            return FakeResponse(status_code=403)
+        return FakeResponse(payload={
+            'status_code': 0,
+            'aweme_list': [{'aweme_id': '123'}],
+            'has_more': 0,
+        })
+
+    monkeypatch.setattr(Params, 'with_web_id', lambda self, *args, **kwargs: self)
+    monkeypatch.setattr(Params, 'with_a_bogus', fake_with_a_bogus)
+    monkeypatch.setattr(douyin_module.requests, 'get', fake_get)
+    monkeypatch.setattr(douyin_module.time, 'sleep', sleeps.append)
+
+    result = DouyinAPI.get_user_work_info(
+        RetryAuth(),
+        'https://www.douyin.com/user/sec-user',
+        '0',
+    )
+
+    assert result['aweme_list'][0]['aweme_id'] == '123'
+    assert [call['params']['msToken'] for call in request_calls] == [
+        'token-1',
+        'token-1',
+        'token-2',
+    ]
+    assert [call['params']['a_bogus'] for call in request_calls] == [
+        'signed-1',
+        'signed-2',
+        'signed-3',
+    ]
+    assert sleeps == [0.5, 1.0]
+
+
+def test_user_work_single_403_does_not_refresh_token(monkeypatch):
+    """单次随机 403 只需重新签名，不应破坏当前 token 会话。"""
+    request_calls = []
+
+    class RetryAuth:
+        cookie = {'s_v_web_id': 'fp'}
+        msToken = 'stable-token'
+
+        def __init__(self):
+            self.refresh_calls = 0
+
+        def refresh_mstoken(self):
+            self.refresh_calls += 1
+            return 'fresh-token'
+
+    def fake_get(*args, **kwargs):
+        request_calls.append(kwargs)
+        if len(request_calls) == 1:
+            return FakeResponse(status_code=403)
+        return FakeResponse(payload={
+            'status_code': 0,
+            'aweme_list': [],
+            'has_more': 0,
+        })
+
+    monkeypatch.setattr(Params, 'with_web_id', lambda self, *args, **kwargs: self)
+    monkeypatch.setattr(Params, 'with_a_bogus', lambda self, *args, **kwargs: self)
+    monkeypatch.setattr(douyin_module.requests, 'get', fake_get)
+    monkeypatch.setattr(douyin_module.time, 'sleep', lambda *_: None)
+    auth = RetryAuth()
+
+    DouyinAPI.get_user_work_info(
+        auth,
+        'https://www.douyin.com/user/sec-user',
+        '0',
+    )
+
+    assert auth.refresh_calls == 0
+    assert [call['params']['msToken'] for call in request_calls] == [
+        'stable-token',
+        'stable-token',
+    ]
+
+
+def test_auth_refresh_mstoken_bypasses_global_cache(monkeypatch):
+    """强制刷新 msToken 时应绕过底层全局缓存。"""
+    from builder.auth import DouyinAuth
+    import builder.auth as auth_module
+
+    calls = []
+
+    def fake_generate_dynamic_mstoken(**kwargs):
+        calls.append(kwargs)
+        return 'fresh-token'
+
+    monkeypatch.setattr(
+        auth_module,
+        'generate_dynamic_msToken',
+        fake_generate_dynamic_mstoken,
+    )
+    auth = DouyinAuth()
+    auth._ttwid = 'test-ttwid'
+    auth.msToken = 'old-token'
+
+    assert auth.refresh_mstoken() == 'fresh-token'
+    assert auth.msToken == 'fresh-token'
+    assert calls == [{'ttwid': 'test-ttwid', 'use_cache': False}]
+
+
+def test_user_work_returns_request_rejection_after_retry_exhaustion(monkeypatch):
+    """连续 403 耗尽重试后不应误判为账号登录失效。"""
+    calls = []
+    monkeypatch.setattr(Params, 'with_web_id', lambda self, *args, **kwargs: self)
+    monkeypatch.setattr(Params, 'with_a_bogus', lambda self, *args, **kwargs: self)
+    monkeypatch.setattr(
+        douyin_module.requests,
+        'get',
+        lambda *args, **kwargs: calls.append(kwargs) or FakeResponse(status_code=403),
+    )
+    monkeypatch.setattr(douyin_module.time, 'sleep', lambda *_: None)
+    auth = SimpleNamespace(cookie={'s_v_web_id': 'fp'}, msToken='token')
+
+    with pytest.raises(DouyinRequestRejectedError):
+        DouyinAPI.get_user_work_info(
+            auth,
+            'https://www.douyin.com/user/sec-user',
+            '0',
+        )
+
+    assert len(calls) == 5
+
+
+def test_api_request_logs_generated_params_and_post_body(monkeypatch):
+    """API 日志应包含完整生成参数和 POST 正文。"""
+    calls = []
+    logs = []
+
+    def fake_post(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResponse(payload={'status_code': 0})
+
+    monkeypatch.setattr(douyin_module.requests, 'post', fake_post)
+    monkeypatch.setattr(
+        douyin_module.logger,
+        'info',
+        lambda message, *args: logs.append((message, args)),
+    )
+
+    body = {'aweme_id': '123', 'text': '测试正文'}
+    params = {
+        'cursor': '2',
+        'msToken': 'secret-token',
+        'a_bogus': 'secret-signature',
+        'verifyFp': 'secret-fingerprint',
+        'fp': 'secret-fingerprint',
+        'webid': 'secret-webid',
+    }
+
+    DouyinAPI._request(
+        'POST',
+        'https://www.douyin.com/aweme/v1/web/comment/publish/?leaked=1',
+        params=params,
+        data=body,
+        cookies={'sessionid': 'secret-cookie'},
+    )
+
+    assert calls[0][0] == (
+        'https://www.douyin.com/aweme/v1/web/comment/publish/?leaked=1',
+    )
+    assert logs == [(
+        '抖音 API 请求 method={} url={} params={} data={}',
+        (
+            'POST',
+            'https://www.douyin.com/aweme/v1/web/comment/publish/?leaked=1',
+            params,
+            body,
+        ),
+    )]
 
 
 def test_work_detail_prefers_minimal_params(monkeypatch):
@@ -333,6 +574,31 @@ def test_bdms_signer_uses_last_87_characters(monkeypatch):
     assert result == 'x' * 87
 
 
+def test_bdms_signer_can_return_full_signature(monkeypatch):
+    """综合搜索应使用 bdms.js 返回的完整签名。"""
+    full_sign = 'x' * 192
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stdout = json.dumps({'a_bogus': full_sign})
+        stderr = ''
+
+    monkeypatch.setattr(dy_util_module.shutil, 'which', lambda name: 'node')
+    monkeypatch.setattr(
+        dy_util_module.subprocess,
+        'run',
+        lambda *args, **kwargs: FakeCompletedProcess(),
+    )
+
+    result = dy_util_module.generate_a_bogus_bdms(
+        '/aweme/v1/web/general/search/single/',
+        'aid=6383',
+        tail_length=None,
+    )
+
+    assert result == full_sign
+
+
 def test_search_stops_after_empty_page_even_when_upstream_claims_more(monkeypatch):
     calls = []
 
@@ -465,7 +731,14 @@ def test_search_limit_stops_inside_page_and_reports_more(monkeypatch):
 
 def test_general_search_carries_response_search_id_to_next_page(monkeypatch):
     monkeypatch.setattr(Params, 'with_web_id', lambda self, *args, **kwargs: self)
-    monkeypatch.setattr(douyin_module, 'generate_a_bogus_pure', lambda *args: 'signed')
+    signer_calls = []
+
+    def fake_with_a_bogus(self, *args, **kwargs):
+        signer_calls.append(kwargs)
+        self.add_param('a_bogus', 'signed')
+        return self
+
+    monkeypatch.setattr(Params, 'with_a_bogus', fake_with_a_bogus)
     calls = []
 
     def fake_get(*args, **kwargs):
@@ -487,4 +760,9 @@ def test_general_search_carries_response_search_id_to_next_page(monkeypatch):
 
     assert calls[0]['params']['search_source'] == 'normal_search'
     assert calls[0]['params']['search_id'] == 'previous-search-id'
+    assert calls[0]['params']['a_bogus'] == 'signed'
+    assert signer_calls == [{
+        'api_path': '/aweme/v1/web/general/search/single/',
+        'bdms_tail_length': None,
+    }]
     assert response['_search_id'] == 'next-search-id'

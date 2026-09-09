@@ -19,12 +19,16 @@ from builder.header import HeaderBuilder, HeaderType
 from builder.params import Params
 from builder.proto import ProtoBuilder
 from utils.fingerprint import get_profile
-from utils.dy_util import splice_url, generate_a_bogus, generate_msToken, trans_cookies, generate_a_bogus_pure
+from utils.dy_util import splice_url, generate_a_bogus, generate_msToken, trans_cookies
 from utils.http_util import get_douyin_http_timeout, get_douyin_tls_verify
 
 
 class DouyinAuthenticationError(RuntimeError):
     """抖音明确返回登录态失效。"""
+
+
+class DouyinRequestRejectedError(RuntimeError):
+    """抖音仅拒绝当前签名请求，不代表账号登录态失效。"""
 
 
 class DouyinRiskControlError(RuntimeError):
@@ -168,6 +172,21 @@ class DouyinAPI:
     douyin_url = 'https://www.douyin.com'
     live_url = 'https://live.douyin.com'
     creator = "https://creator.douyin.com"
+    user_work_max_attempts = 5
+    user_work_retry_delay_seconds = 0.5
+
+    @staticmethod
+    def _request(method: str, url: str, **kwargs):
+        """记录抖音 API 的最终请求参数后发起请求。"""
+        # 调试日志保留完整参数，便于直接复现上游请求。
+        logger.info(
+            '抖音 API 请求 method={} url={} params={} data={}',
+            method.upper(),
+            url,
+            kwargs.get('params') or {},
+            kwargs.get('data'),
+        )
+        return getattr(requests, method.lower())(url, **kwargs)
 
 
     @staticmethod
@@ -238,52 +257,89 @@ class DouyinAPI:
         user_id = user_url.split("/")[-1].split("?")[0]
         headers = HeaderBuilder().build(HeaderType.GET)
         headers.set_referer(user_url)
-        params = Params()
-        params.add_param("device_platform", 'webapp')
-        params.add_param("aid", '6383')
-        params.add_param("channel", 'channel_pc_web')
-        params.add_param("sec_user_id", user_id)
-        params.add_param("max_cursor", max_cursor)
-        params.add_param("locate_query", 'false')
-        params.add_param("show_live_replay_strategy", '1')
-        params.add_param("need_time_list", '1' if max_cursor == '0' else '0')
-        params.add_param("time_list_query", '0')
-        params.add_param("whale_cut_token", '')
-        params.add_param("cut_version", '1')
-        params.add_param("count", '18')
-        params.add_param("publish_video_strategy_type", '2')
-        params.add_param("update_version_code", '170400')
-        params.add_param("pc_client_type", '1')
-        params.add_param("version_code", '290100')
-        params.add_param("version_name", '29.1.0')
-        params.add_param("cookie_enabled", 'true')
-        params.add_param("screen_width", get_profile()["screen_width"])
-        params.add_param("screen_height", get_profile()["screen_height"])
-        params.add_param("browser_language", 'zh-CN')
-        params.add_param("browser_platform", 'Win32')
-        params.add_param("browser_name", get_profile()["browser_name"])
-        params.add_param("browser_version", get_profile()["browser_version"])
-        params.add_param("browser_online", 'true')
-        params.add_param("engine_name", 'Blink')
-        params.add_param("engine_version", get_profile()["engine_version"])
-        params.add_param("os_name", 'Windows')
-        params.add_param("os_version", '10')
-        params.add_param("cpu_core_num", get_profile()["cpu_core_num"])
-        params.add_param("device_memory", get_profile()["device_memory"])
-        params.add_param("platform", 'PC')
-        params.add_param("downlink", '10')
-        params.add_param("effective_type", '4g')
-        params.add_param("round_trip_time", '100')
-        params.with_web_id(auth, user_url)
-        params.add_param("verifyFp", auth.cookie['s_v_web_id'])
-        params.add_param("fp", auth.cookie['s_v_web_id'])
-        params.add_param("msToken",
-                         auth.msToken)
-        params.with_a_bogus()
-        resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=get_douyin_tls_verify(),
-                            timeout=get_douyin_http_timeout())
-        return parse_douyin_response(resp)
+        ms_token = auth.msToken
+        for attempt in range(DouyinAPI.user_work_max_attempts):
+            params = Params()
+            params.add_param("device_platform", 'webapp')
+            params.add_param("aid", '6383')
+            params.add_param("channel", 'channel_pc_web')
+            params.add_param("sec_user_id", user_id)
+            params.add_param("max_cursor", max_cursor)
+            params.add_param("locate_query", 'false')
+            params.add_param("show_live_replay_strategy", '1')
+            params.add_param("need_time_list", '1' if max_cursor == '0' else '0')
+            params.add_param("time_list_query", '0')
+            params.add_param("whale_cut_token", '')
+            params.add_param("cut_version", '1')
+            params.add_param("count", '18')
+            params.add_param("publish_video_strategy_type", '2')
+            params.add_param("update_version_code", '170400')
+            params.add_param("pc_client_type", '1')
+            params.add_param("version_code", '290100')
+            params.add_param("version_name", '29.1.0')
+            params.add_param("cookie_enabled", 'true')
+            params.add_param("screen_width", get_profile()["screen_width"])
+            params.add_param("screen_height", get_profile()["screen_height"])
+            params.add_param("browser_language", 'zh-CN')
+            params.add_param("browser_platform", 'Win32')
+            params.add_param("browser_name", get_profile()["browser_name"])
+            params.add_param("browser_version", get_profile()["browser_version"])
+            params.add_param("browser_online", 'true')
+            params.add_param("engine_name", 'Blink')
+            params.add_param("engine_version", get_profile()["engine_version"])
+            params.add_param("os_name", 'Windows')
+            params.add_param("os_version", '10')
+            params.add_param("cpu_core_num", get_profile()["cpu_core_num"])
+            params.add_param("device_memory", get_profile()["device_memory"])
+            params.add_param("platform", 'PC')
+            params.add_param("downlink", '10')
+            params.add_param("effective_type", '4g')
+            params.add_param("round_trip_time", '100')
+            params.with_web_id(auth, user_url)
+            params.add_param("verifyFp", auth.cookie['s_v_web_id'])
+            params.add_param("fp", auth.cookie['s_v_web_id'])
+            params.add_param("msToken", ms_token)
+            # 每次重试重新生成签名，避免偶发无效签名直接冷却账号。
+            params.with_a_bogus()
+            resp = DouyinAPI._request(
+                'GET',
+                f'{DouyinAPI.douyin_url}{api}',
+                headers=headers.get(),
+                cookies=auth.cookie,
+                params=params.get(),
+                verify=get_douyin_tls_verify(),
+                timeout=get_douyin_http_timeout(),
+            )
+            try:
+                return parse_douyin_response(resp)
+            except DouyinAuthenticationError:
+                if resp.status_code != 403:
+                    raise
+
+                if attempt >= DouyinAPI.user_work_max_attempts - 1:
+                    # 此接口的 403 具有随机性，不能据此冷却整个账号。
+                    raise DouyinRequestRejectedError(
+                        '用户作品请求连续被拒绝'
+                    )
+
+                token_refreshed = False
+                if attempt == 1:
+                    # 连续两次 403 后只刷新一次 token，首次失败仅重新签名。
+                    refresher = getattr(auth, 'refresh_mstoken', None)
+                    try:
+                        ms_token = refresher() if callable(refresher) else generate_msToken()
+                    except Exception:
+                        ms_token = generate_msToken()
+                    token_refreshed = True
+                logger.warning(
+                    '用户作品请求被拒绝，重新签名后重试 attempt={} status={} token_refreshed={}',
+                    attempt + 1,
+                    resp.status_code,
+                    token_refreshed,
+                )
+                time.sleep(DouyinAPI.user_work_retry_delay_seconds * (attempt + 1))
+
+        raise DouyinRequestRejectedError('用户作品请求连续被拒绝')
 
     @staticmethod
     def get_work_info(auth, url: str) -> dict:
@@ -307,7 +363,8 @@ class DouyinAPI:
             'aweme_id': aweme_id,
         }
         try:
-            basic_response = requests.get(
+            basic_response = DouyinAPI._request(
+                'GET',
                 f'{DouyinAPI.douyin_url}{api}',
                 headers=headers.get(),
                 cookies=auth.cookie,
@@ -359,9 +416,15 @@ class DouyinAPI:
         params.with_a_bogus()
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
-        resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=get_douyin_tls_verify(),
-                            timeout=get_douyin_http_timeout())
+        resp = DouyinAPI._request(
+            'GET',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            cookies=auth.cookie,
+            params=params.get(),
+            verify=get_douyin_tls_verify(),
+            timeout=get_douyin_http_timeout(),
+        )
         resp_json = parse_douyin_response(resp)
         return resp_json
 
@@ -425,9 +488,15 @@ class DouyinAPI:
         params.add_param("fp", auth.cookie['s_v_web_id'])
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
-        resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=get_douyin_tls_verify(),
-                            timeout=get_douyin_http_timeout())
+        resp = DouyinAPI._request(
+            'GET',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            cookies=auth.cookie,
+            params=params.get(),
+            verify=get_douyin_tls_verify(),
+            timeout=get_douyin_http_timeout(),
+        )
         return parse_douyin_response(resp)
 
     @staticmethod
@@ -504,9 +573,15 @@ class DouyinAPI:
         params.add_param("fp", auth.cookie['s_v_web_id'])
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus(api_path=api)
-        resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=get_douyin_tls_verify(),
-                            timeout=get_douyin_http_timeout())
+        resp = DouyinAPI._request(
+            'GET',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            cookies=auth.cookie,
+            params=params.get(),
+            verify=get_douyin_tls_verify(),
+            timeout=get_douyin_http_timeout(),
+        )
         # 统一解析认证错误，使账号池可以执行冷却和切换。
         return parse_douyin_response(resp)
 
@@ -594,9 +669,15 @@ class DouyinAPI:
         params.add_param('verifyFp', auth.cookie['s_v_web_id'])
         params.add_param('fp', auth.cookie['s_v_web_id'])
         params.with_a_bogus()
-        resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=get_douyin_tls_verify(),
-                            timeout=get_douyin_http_timeout())
+        resp = DouyinAPI._request(
+            'GET',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            cookies=auth.cookie,
+            params=params.get(),
+            verify=get_douyin_tls_verify(),
+            timeout=get_douyin_http_timeout(),
+        )
         return parse_douyin_response(resp)
 
     @staticmethod
@@ -664,11 +745,17 @@ class DouyinAPI:
         params.add_param("round_trip_time", "50")
         params.with_web_id(auth, refer)
         params.add_param("msToken", auth.msToken)
-        # 综合搜索风控(antispam_check)只认新算法签名：纯算 a_bogus（Python 原生执行 bdms VMP）
-        params.add_param('a_bogus', generate_a_bogus_pure(api, splice_url(params.get())))
-        resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=get_douyin_tls_verify(),
-                            timeout=get_douyin_http_timeout())
+        # 综合搜索使用 bdms.js 生成完整 a_bogus。
+        params.with_a_bogus(api_path=api, bdms_tail_length=None)
+        resp = DouyinAPI._request(
+            'GET',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            cookies=auth.cookie,
+            params=params.get(),
+            verify=get_douyin_tls_verify(),
+            timeout=get_douyin_http_timeout(),
+        )
         json_data = parse_douyin_response(resp)
         response_headers = getattr(resp, 'headers', {})
         next_search_id = response_headers.get('X-Tt-Logid', '') if response_headers else ''
@@ -834,8 +921,14 @@ class DouyinAPI:
         params.with_web_id(auth, refer)
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
-        resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+        resp = DouyinAPI._request(
+            'GET',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            cookies=auth.cookie,
+            params=params.get(),
+            verify=False,
+        )
         return resp.json()
 
     @staticmethod
@@ -891,8 +984,14 @@ class DouyinAPI:
         params.with_web_id(auth, refer)
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
-        resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+        resp = DouyinAPI._request(
+            'GET',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            cookies=auth.cookie,
+            params=params.get(),
+            verify=False,
+        )
         return resp.json()
 
     @staticmethod
@@ -970,9 +1069,14 @@ class DouyinAPI:
         params.add_param("msToken",
                          auth.msToken)
         params.with_a_bogus()
-        response = requests.get('https://www.douyin.com/aweme/v1/web/aweme/favorite/', params=params.get(),
-                                headers=headers.get(), cookies=auth.cookie,
-                                verify=False)
+        response = DouyinAPI._request(
+            'GET',
+            'https://www.douyin.com/aweme/v1/web/aweme/favorite/',
+            params=params.get(),
+            headers=headers.get(),
+            cookies=auth.cookie,
+            verify=False,
+        )
         return response.json()
 
 
@@ -994,7 +1098,14 @@ class DouyinAPI:
         params.add_param('verifyFp', auth.cookie['s_v_web_id'])
         params.add_param('fp', auth.cookie['s_v_web_id'])
         params.with_a_bogus()
-        resp = requests.get(url, params=params.get(), verify=False, headers=headers.get(), cookies=auth.cookie)
+        resp = DouyinAPI._request(
+            'GET',
+            url,
+            params=params.get(),
+            verify=False,
+            headers=headers.get(),
+            cookies=auth.cookie,
+        )
         resp_json = json.loads(resp.text)
         return int(resp_json['user_uid'])
 
@@ -1010,7 +1121,13 @@ class DouyinAPI:
         params = {
             "from_tab_name": "main"
         }
-        response = requests.get(url, headers=headers.get(), cookies=auth.cookie, params=params)
+        response = DouyinAPI._request(
+            'GET',
+            url,
+            headers=headers.get(),
+            cookies=auth.cookie,
+            params=params,
+        )
         sec_uid = re.findall(r'\\"secUid\\":\\"(.*?)\\"', response.text)[0]
         return sec_uid
 
@@ -1039,7 +1156,13 @@ class DouyinAPI:
             "upgrade-insecure-requests": "1",
             "user-agent": get_profile()["ua"]
         }
-        res = requests.get(url, headers=headers, cookies=auth_.cookie, verify=False)
+        res = DouyinAPI._request(
+            'GET',
+            url,
+            headers=headers,
+            cookies=auth_.cookie,
+            verify=False,
+        )
         ttwid = res.cookies.get_dict()['ttwid']
         soup = BeautifulSoup(res.text, 'html.parser')
         scripts = soup.select('script[nonce]')
@@ -1121,8 +1244,14 @@ class DouyinAPI:
         params.with_web_id(auth, url)
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
-        res = requests.post(f'{DouyinAPI.live_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                           params=params.get(), verify=False)
+        res = DouyinAPI._request(
+            'POST',
+            f'{DouyinAPI.live_url}{api}',
+            headers=headers.get(),
+            cookies=auth.cookie,
+            params=params.get(),
+            verify=False,
+        )
         return res.json()
 
     @staticmethod
@@ -1206,8 +1335,15 @@ class DouyinAPI:
             "use_new_price": "1"
         }
         params.with_a_bogus(data)
-        res = requests.post(f'{DouyinAPI.live_url}{api}', headers=headers.get(), params=params.get(),
-                            cookies=auth.cookie, data=data, verify=False)
+        res = DouyinAPI._request(
+            'POST',
+            f'{DouyinAPI.live_url}{api}',
+            headers=headers.get(),
+            params=params.get(),
+            cookies=auth.cookie,
+            data=data,
+            verify=False,
+        )
         return res.json()
 
     @staticmethod
@@ -1262,8 +1398,15 @@ class DouyinAPI:
             "aweme_type": "0",
         }
         params.with_a_bogus(data)
-        res = requests.post(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                            cookies=auth.cookie, data=data, verify=False)
+        res = DouyinAPI._request(
+            'POST',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            params=params.get(),
+            cookies=auth.cookie,
+            data=data,
+            verify=False,
+        )
         return res.json()
 
     @staticmethod
@@ -1320,8 +1463,14 @@ class DouyinAPI:
         params.add_param("fp", auth.cookie['s_v_web_id'])
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
-        res = requests.post(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                            cookies=auth.cookie, verify=False)
+        res = DouyinAPI._request(
+            'POST',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            params=params.get(),
+            cookies=auth.cookie,
+            verify=False,
+        )
         return res.json()
 
     @staticmethod
@@ -1376,8 +1525,14 @@ class DouyinAPI:
         params.add_param("fp", auth.cookie['s_v_web_id'])
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
-        res = requests.post(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                            cookies=auth.cookie, verify=False)
+        res = DouyinAPI._request(
+            'POST',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            params=params.get(),
+            cookies=auth.cookie,
+            verify=False,
+        )
         return res.json()
 
     @staticmethod
@@ -1424,8 +1579,14 @@ class DouyinAPI:
         params.with_a_bogus()
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
-        res = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+        res = DouyinAPI._request(
+            'GET',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            params=params.get(),
+            cookies=auth.cookie,
+            verify=False,
+        )
         return res.json()
 
     @staticmethod
@@ -1483,8 +1644,14 @@ class DouyinAPI:
         params.with_a_bogus()
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
-        res = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+        res = DouyinAPI._request(
+            'GET',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            params=params.get(),
+            cookies=auth.cookie,
+            verify=False,
+        )
         return res.json()
 
     @staticmethod
@@ -1567,8 +1734,14 @@ class DouyinAPI:
         params.with_a_bogus()
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
-        res = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+        res = DouyinAPI._request(
+            'GET',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            params=params.get(),
+            cookies=auth.cookie,
+            verify=False,
+        )
         return res.json()
 
     @staticmethod
@@ -1647,8 +1820,14 @@ class DouyinAPI:
         params.with_a_bogus()
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
-        res = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+        res = DouyinAPI._request(
+            'GET',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            params=params.get(),
+            cookies=auth.cookie,
+            verify=False,
+        )
         return res.json()
 
     @staticmethod
@@ -1731,8 +1910,14 @@ class DouyinAPI:
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
 
-        res = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+        res = DouyinAPI._request(
+            'GET',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            params=params.get(),
+            cookies=auth.cookie,
+            verify=False,
+        )
         return res.json()
 
 
@@ -1791,8 +1976,14 @@ class DouyinAPI:
         params.add_param("update_scene", "rank_message")
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
-        response = requests.get(url, headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+        response = DouyinAPI._request(
+            'GET',
+            url,
+            headers=headers.get(),
+            params=params.get(),
+            cookies=auth.cookie,
+            verify=False,
+        )
 
         print(response.text)
         print(response)
@@ -1838,8 +2029,14 @@ class DouyinAPI:
         params.add_param("tz_name", "Asia/Shanghai")
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
-        res = requests.get(f'{DouyinAPI.live_url}{api}', headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+        res = DouyinAPI._request(
+            'GET',
+            f'{DouyinAPI.live_url}{api}',
+            headers=headers.get(),
+            params=params.get(),
+            cookies=auth.cookie,
+            verify=False,
+        )
         return res.content
 
     @staticmethod
@@ -1870,8 +2067,15 @@ class DouyinAPI:
         data = {
         }
         params.with_a_bogus(data)
-        res = requests.post(f'{DouyinAPI.live_url}{api}', headers=headers.get(), params=params.get(),
-                            cookies=auth.cookie, data=data, verify=False)
+        res = DouyinAPI._request(
+            'POST',
+            f'{DouyinAPI.live_url}{api}',
+            headers=headers.get(),
+            params=params.get(),
+            cookies=auth.cookie,
+            data=data,
+            verify=False,
+        )
         return res.json()
 
     @staticmethod
@@ -1902,8 +2106,14 @@ class DouyinAPI:
         params.add_param("type", '0')
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
-        res = requests.get(f'{DouyinAPI.live_url}{api}', headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+        res = DouyinAPI._request(
+            'GET',
+            f'{DouyinAPI.live_url}{api}',
+            headers=headers.get(),
+            params=params.get(),
+            cookies=auth.cookie,
+            verify=False,
+        )
         return res.json()
 
     @staticmethod
@@ -1966,8 +2176,15 @@ class DouyinAPI:
         params.with_a_bogus(data)
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
-        res = requests.post(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                            cookies=auth.cookie, data=data, verify=False)
+        res = DouyinAPI._request(
+            'POST',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            params=params.get(),
+            cookies=auth.cookie,
+            data=data,
+            verify=False,
+        )
         return res.json()
 
     @staticmethod
@@ -1983,7 +2200,8 @@ class DouyinAPI:
         headers = HeaderBuilder().build(HeaderType.PROTOBUF)
         headers.set_header('referer', 'https://www.douyin.com/')
 
-        resp = requests.post(
+        resp = DouyinAPI._request(
+            'POST',
             url,
             headers=headers.get(),
             cookies=auth.cookie,
@@ -2006,7 +2224,8 @@ class DouyinAPI:
         headers = HeaderBuilder().build(HeaderType.PROTOBUF)
         headers.set_header('referer', 'https://www.douyin.com/')
 
-        resp = requests.post(
+        resp = DouyinAPI._request(
+            'POST',
             url,
             headers=headers.get(),
             cookies=auth.cookie,
@@ -2046,8 +2265,15 @@ class DouyinAPI:
         query = splice_url(params)
         abogus = generate_a_bogus(query)
         params['a_bogus'] = abogus
-        resp = requests.post(url, params=params, headers=headers.get(), verify=False, cookies=auth.cookie,
-                             data=requestProto.SerializeToString())
+        resp = DouyinAPI._request(
+            'POST',
+            url,
+            params=params,
+            headers=headers.get(),
+            verify=False,
+            cookies=auth.cookie,
+            data=requestProto.SerializeToString(),
+        )
         responseProto = ResponseProto.Response()
         responseProto.ParseFromString(resp.content)
         resp_json = protobuf_to_dict(responseProto)
@@ -2079,7 +2305,14 @@ class DouyinAPI:
          .add_param('fp', auth.cookie['s_v_web_id'])
          .with_a_bogus()
          )
-        resp = requests.get(url, params=params.get(), verify=False, headers=headers.get(), cookies=auth.cookie)
+        resp = DouyinAPI._request(
+            'GET',
+            url,
+            params=params.get(),
+            verify=False,
+            headers=headers.get(),
+            cookies=auth.cookie,
+        )
         resp_json = json.loads(resp.text)
         return resp_json['id']
 
@@ -2113,8 +2346,15 @@ class DouyinAPI:
             'item_type': '0',
             'type': digg_type,
         }
-        resp = requests.post(url, params=params.get(), headers=headers.get(), cookies=auth.cookie, data=data,
-                             verify=False)
+        resp = DouyinAPI._request(
+            'POST',
+            url,
+            params=params.get(),
+            headers=headers.get(),
+            cookies=auth.cookie,
+            data=data,
+            verify=False,
+        )
         print(resp.text)
         resp_json = json.loads(resp.text)
         return resp_json['is_digg'] == 0
@@ -2217,8 +2457,14 @@ class DouyinAPI:
         params.with_a_bogus()
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
-        resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+        resp = DouyinAPI._request(
+            'GET',
+            f'{DouyinAPI.douyin_url}{api}',
+            headers=headers.get(),
+            cookies=auth.cookie,
+            params=params.get(),
+            verify=False,
+        )
         search_id = resp.headers["X-Tt-Logid"]
         json_data = resp.json()
         return search_id, json_data["guide_search_words"], json_data

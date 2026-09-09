@@ -78,11 +78,15 @@ def generate_msToken(randomlength=107):
     return random_str
 
 
-def generate_dynamic_msToken(ttwid=None, proxies=None):
+def generate_dynamic_msToken(ttwid=None, proxies=None, use_cache=True):
     """msToken"""
     try:
         from utils.mstoken import get_mstoken
-        return get_mstoken(ttwid=ttwid, proxies=proxies) or ''
+        return get_mstoken(
+            ttwid=ttwid,
+            proxies=proxies,
+            use_cache=use_cache,
+        ) or ''
     except Exception:
         return ''
 
@@ -113,7 +117,12 @@ def generate_a_bogus_pure(api_path, query):
     return _pure_sign().sign(f'https://www.douyin.com{api_path}?{query}')
 
 
-def generate_a_bogus_bdms(api_path, query, method="GET", body=None):
+def generate_a_bogus_bdms(
+        api_path,
+        query,
+        method="GET",
+        body=None,
+        tail_length=BDMS_A_BOGUS_TAIL_LENGTH):
     """调用项目内 bdms JavaScript 生成 a_bogus。"""
     project_root = Path(__file__).resolve().parents[1]
     script_path = project_root / "js" / "bdms_1.0.1.19_fix.js"
@@ -172,10 +181,12 @@ process.stdin.on("end", () => {
         raise RuntimeError("bdms a_bogus 返回格式错误") from error
     if not isinstance(signed, str) or not signed:
         raise RuntimeError("bdms 未返回有效 a_bogus")
-    if len(signed) < BDMS_A_BOGUS_TAIL_LENGTH:
+    # 搜索接口使用完整签名，二级评论保留末尾签名。
+    if tail_length is None:
+        return signed
+    if len(signed) < tail_length:
         raise RuntimeError("bdms a_bogus 长度不足，无法提取末尾签名")
-    # 当前二级评论接口使用 bdms 输出的末尾 87 个字符。
-    return signed[-BDMS_A_BOGUS_TAIL_LENGTH:]
+    return signed[-tail_length:]
 
 
 

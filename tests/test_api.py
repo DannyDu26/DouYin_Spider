@@ -69,6 +69,7 @@ class FakeDouyinAPI:
         self.comment_args = None
         self.sub_comment_args = None
         self.user_work_args = None
+        self.user_info_calls = 0
         self.work_info_urls = []
         self.comment_response = {
             'comments': [make_comment()],
@@ -89,6 +90,7 @@ class FakeDouyinAPI:
         return {'aweme_detail': make_work(work_id)}
 
     def get_user_info(self, auth, user_url):
+        self.user_info_calls += 1
         return {'user': {'nickname': '主页昵称', 'follower_count': 88}}
 
     def get_work_out_comment(self, auth, url, cursor, count):
@@ -311,6 +313,7 @@ def test_batch_works_supports_partial_success_without_leaking_error(client):
     assert body['data']['failed_count'] == 1
     assert body['data']['items'][0]['work_id'] == '101'
     assert body['data']['errors'][0]['error'] == 'RuntimeError'
+    assert body['data']['errors'][0]['message'] == 'secret-token=[已脱敏]'
     assert 'should-not-leak' not in response.text
 
 
@@ -321,6 +324,41 @@ def test_batch_works_all_failed_returns_502(client):
     assert response.status_code == 502
     assert response.json()['error']['code'] == 'UPSTREAM_ERROR'
     assert response.json()['error']['details'][0]['error'] == 'RuntimeError'
+    assert response.json()['error']['details'][0]['message'] == 'secret-token=[已脱敏]'
+
+
+def test_upstream_failure_returns_specific_message(client, fake_api, monkeypatch):
+    """抓取异常的具体原因应返回到 API message。"""
+    monkeypatch.setattr(
+        fake_api,
+        'get_work_out_comment',
+        lambda *args: (_ for _ in ()).throw(RuntimeError('连接抖音上游超时')),
+    )
+
+    response = client.post('/api/v1/douyin/video_comments', json={
+        'url': 'https://www.douyin.com/video/101',
+    })
+
+    assert response.status_code == 502
+    assert response.json()['error']['message'] == '视频评论抓取失败：连接抖音上游超时'
+
+
+def test_upstream_status_message_is_returned_for_failed_work(client, fake_api, monkeypatch):
+    """上游业务错误文案应优先于本地字段校验错误。"""
+    monkeypatch.setattr(
+        fake_api,
+        'get_work_info',
+        lambda *args: {'status_code': 500, 'status_msg': '作品不存在或已删除'},
+    )
+
+    response = client.post('/api/v1/douyin/video_info', json={
+        'video_id': '101',
+    })
+
+    assert response.status_code == 502
+    assert response.json()['error']['details'][0]['message'] == (
+        '上游响应缺少 aweme_detail：作品不存在或已删除'
+    )
 
 
 def test_work_comments_returns_paginated_data_and_passes_parameters(client, fake_api, capfd):
@@ -572,7 +610,7 @@ def test_invalid_user_homepage_is_a_422_parameter_error(client, user_url):
     assert response.json()['error']['code'] == 'INVALID_REQUEST'
 
 
-def test_user_works_returns_normalized_data(client):
+def test_user_works_returns_normalized_data_without_profile_request(client, fake_api):
     response = client.post('/api/v1/douyin/user_videos', json={
         'user_url': 'https://www.douyin.com/user/sec-user',
         'page_num': 2,
@@ -580,8 +618,8 @@ def test_user_works_returns_normalized_data(client):
     body = response.json()
     assert response.status_code == 200
     assert body['data']['total'] == 2
-    assert body['data']['items'][0]['nickname'] == '主页昵称'
-    assert body['data']['items'][0]['follower_count'] == 88
+    assert body['data']['items'][0]['nickname'] == '测试用户'
+    assert fake_api.user_info_calls == 0
 
 
 def test_user_works_accepts_user_id(client, fake_api):
@@ -637,6 +675,93 @@ def test_search_works_passes_filters(client, fake_api):
         'account_id': 'default',
         'failover_count': 0,
     }
+
+
+def test_search_videos_runs_serially():
+    """search_videos 即使服务全局并发更高也只能串行执行。"""
+    class CountingSearchAPI(FakeDouyinAPI):
+        def __init__(self):
+            super().__init__()
+            self.active = 0
+            self.maximum = 0
+            self.lock = threading.Lock()
+
+        def search_some_general_work(self, *args):
+            with self.lock:
+                self.active += 1
+                self.maximum = max(self.maximum, self.active)
+            time.sleep(0.03)
+            with self.lock:
+                self.active -= 1
+            return {
+                'items': [{'aweme_info': make_work('search-1')}],
+                'has_more': False,
+                'raw_page_counts': [1],
+            }
+
+    api = CountingSearchAPI()
+    service = SpiderService(
+        auth=object(),
+        max_concurrent=4,
+        douyin_api=api,
+        search_videos_interval_seconds=0,
+    )
+    request_data = SearchWorksRequest(query='测试')
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(
+            lambda index: service.search_works(request_data, str(index)),
+            range(4),
+        ))
+
+    assert len(results) == 4
+    assert api.maximum == 1
+
+
+def test_search_videos_respects_fixed_start_interval(monkeypatch):
+    """连续搜索应按配置补足相邻开始时间间隔。"""
+    clock = {'now': 100.0}
+    sleeps = []
+
+    monkeypatch.setattr(
+        'app.spider_service.time.monotonic',
+        lambda: clock['now'],
+    )
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock['now'] += seconds
+
+    monkeypatch.setattr('app.spider_service.time.sleep', fake_sleep)
+    service = SpiderService(
+        auth=object(),
+        douyin_api=FakeDouyinAPI(),
+        search_videos_interval_seconds=2.5,
+    )
+    request_data = SearchWorksRequest(query='测试')
+
+    service.search_works(request_data, 'first')
+    clock['now'] += 1.0
+    service.search_works(request_data, 'second')
+
+    assert sleeps == [1.5]
+
+
+def test_search_videos_interval_reads_env(monkeypatch):
+    """搜索间隔应支持通过环境变量配置。"""
+    monkeypatch.setenv('SEARCH_VIDEOS_INTERVAL_SECONDS', '1.25')
+
+    service = SpiderService(auth=object(), douyin_api=FakeDouyinAPI())
+
+    assert service.search_videos_interval_seconds == 1.25
+
+
+@pytest.mark.parametrize('value', ['-1', 'nan', 'inf', 'invalid'])
+def test_search_videos_interval_rejects_invalid_env(monkeypatch, value):
+    monkeypatch.setenv('SEARCH_VIDEOS_INTERVAL_SECONDS', value)
+
+    with pytest.raises(RuntimeError, match='SEARCH_VIDEOS_INTERVAL_SECONDS'):
+        SpiderService(auth=object(), douyin_api=FakeDouyinAPI())
 
 
 @pytest.mark.parametrize('query', ['正常词\n伪造日志', '正常词\x1b[31mERROR'])

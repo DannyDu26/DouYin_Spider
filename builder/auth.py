@@ -68,7 +68,12 @@ class DouyinAuth:
         """强制刷新 msToken（如遇接口因 token 过期报错时可调用）。"""
         self._ms_cache = ""
         self._ms_ts = 0
-        return self.msToken
+        # 强制绕过底层全局缓存，避免重试继续使用旧 token。
+        token = generate_dynamic_msToken(ttwid=self._ttwid, use_cache=False)
+        if token:
+            self.msToken = token
+            return token
+        return generate_msToken()
 
     def get_uid(self):
         if self.uid is None:

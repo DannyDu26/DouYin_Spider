@@ -294,7 +294,7 @@ curl -X POST "http://127.0.0.1:5000/api/v1/douyin/video_info" \
   }'
 ~~~
 
-video_id 与 urls 二选一；urls 可提交 1～20 个作品链接。批量接口允许部分成功。成功结果位于 data.items，失败项目位于 data.errors；全部失败时返回 HTTP 502。
+video_id 与 urls 二选一；urls 可提交 1～20 个作品链接。批量接口允许部分成功。成功结果位于 data.items，失败项目位于 data.errors；每个失败项目包含异常类型 `error` 和脱敏后的具体原因 `message`；全部失败时返回 HTTP 502。
 
 ### 视频一级评论
 
@@ -398,6 +398,9 @@ curl -X POST "http://127.0.0.1:5000/api/v1/douyin/search_videos" \
 }
 ~~~
 
+抓取失败时，`error.message` 会返回脱敏后的具体原因；批量作品接口还会在
+`error.details[].message` 或 `data.errors[].message` 中返回每个作品的具体失败原因。
+
 常见状态码：
 
 | HTTP 状态码 | 错误码 | 说明 |
@@ -443,6 +446,7 @@ curl -X POST "http://127.0.0.1:5000/api/v1/douyin/search_videos" \
 | MYSQL_POOL_RECYCLE_SECONDS | 1800 | MySQL 连接回收时间 |
 | MAX_CONCURRENT_REQUESTS | 2 | 服务全局抓取并发 |
 | MAX_CONCURRENT_REQUESTS_PER_ACCOUNT | 1 | 单账号抓取并发 |
+| SEARCH_VIDEOS_INTERVAL_SECONDS | 2 | 搜索接口全局串行执行时，相邻请求开始时间的最小间隔秒数；0 表示只串行不等待 |
 | ENABLE_TEST_ACCOUNT_PINNING | false | 仅 dev 独立风控测试实例可定向搜索账号；生产强制关闭 |
 | ACCOUNT_COOLDOWN_SECONDS | 300 | 认证失败或明确风控后的冷却秒数 |
 | ACCOUNT_COOLDOWN_FAILURE_LIMIT | 3 | 同一凭证累计冷却达到该次数后移出账号池并删除对应数据库记录；0 表示关闭 |

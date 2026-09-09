@@ -3,10 +3,12 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # 使用国内 Debian 镜像源，加速系统依赖安装
+# 安装 BDMS 所需的 Node.js 运行时
 RUN sed -i 's@deb.debian.org@mirrors.tuna.tsinghua.edu.cn@g' \
     /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
+    nodejs \
     curl \
     gnupg \
     build-essential \

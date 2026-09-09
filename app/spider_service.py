@@ -1,7 +1,9 @@
 # coding=utf-8
 import math
 import os
+import re
 import threading
+import time
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -90,6 +92,7 @@ class SpiderService:
             account_pool=None,
             account_acquire_timeout_seconds: float | None = None,
             test_account_pinning_enabled: bool | None = None,
+            search_videos_interval_seconds: float | None = None,
     ):
         if max_concurrent <= 0:
             raise ValueError('max_concurrent 必须是正整数')
@@ -108,8 +111,19 @@ class SpiderService:
                 'ENABLE_TEST_ACCOUNT_PINNING', False
             )
         self.test_account_pinning_enabled = bool(test_account_pinning_enabled)
+        if search_videos_interval_seconds is None:
+            search_videos_interval_seconds = self._non_negative_timeout_from_env(
+                'SEARCH_VIDEOS_INTERVAL_SECONDS', 2.0
+            )
+        if (not math.isfinite(search_videos_interval_seconds)
+                or search_videos_interval_seconds < 0):
+            raise ValueError('search_videos_interval_seconds 必须是有限非负数')
+        self.search_videos_interval_seconds = float(search_videos_interval_seconds)
         # 全局闸门限制服务总并发，账号池另行限制单账号并发
         self._semaphore = threading.BoundedSemaphore(max_concurrent)
+        # 搜索接口全局串行执行，并记录上次开始时间用于固定间隔。
+        self._search_lock = threading.Lock()
+        self._last_search_started_at: float | None = None
 
     @staticmethod
     def _positive_timeout_from_env(name: str, default: float) -> float:
@@ -120,6 +134,17 @@ class SpiderService:
             raise RuntimeError(f'{name} 必须是有限正数') from error
         if not math.isfinite(value) or value <= 0:
             raise RuntimeError(f'{name} 必须是有限正数')
+        return value
+
+    @staticmethod
+    def _non_negative_timeout_from_env(name: str, default: float) -> float:
+        """读取允许为零的固定间隔配置。"""
+        try:
+            value = float(os.getenv(name, str(default)))
+        except ValueError as error:
+            raise RuntimeError(f'{name} 必须是有限非负数') from error
+        if not math.isfinite(value) or value < 0:
+            raise RuntimeError(f'{name} 必须是有限非负数')
         return value
 
     @staticmethod
@@ -139,6 +164,37 @@ class SpiderService:
     def _safe_error(error: Exception) -> str:
         """只暴露异常类型，避免上游请求 URL 中的令牌进入日志或响应。"""
         return error.__class__.__name__
+
+    @classmethod
+    def _safe_error_message(cls, error: Exception) -> str:
+        """返回可用于 API 的具体错误，自动脱敏敏感参数。"""
+        message = str(error).strip()
+        if not message:
+            return cls._safe_error(error)
+
+        # 脱敏异常文本中的令牌、Cookie 和密码等键值。
+        message = re.sub(
+            r'(?i)(\b[\w-]*(?:token|secret|password|cookie|authorization|api[-_]?key|access[-_]?key)'
+            r'[\w-]*\s*[=:]\s*[\'"]?)[^,;\s\'"}&]+',
+            r'\1[已脱敏]',
+            message,
+        )
+        # 异常可能包含带查询参数的上游 URL，统一只保留安全路径。
+        message = re.sub(
+            r'https?://[^\s]+',
+            lambda match: cls._safe_url_for_log(match.group(0)),
+            message,
+        )
+        return message[:500]
+
+    @classmethod
+    def _upstream_error_message(cls, response, fallback: str) -> str:
+        """优先返回抖音业务错误文案，响应异常时使用本地校验原因。"""
+        if isinstance(response, dict):
+            upstream_message = response.get('status_msg') or response.get('message')
+            if isinstance(upstream_message, str) and upstream_message.strip():
+                return f'{fallback}：{cls._safe_error_message(ValueError(upstream_message))}'
+        return fallback
 
     @staticmethod
     def _safe_url_for_log(value: str) -> str:
@@ -232,7 +288,10 @@ class SpiderService:
                     response = self.douyin_api.get_work_info(auth, work_url)
                     detail = response.get('aweme_detail') if isinstance(response, dict) else None
                     if not isinstance(detail, dict):
-                        raise ValueError('上游响应缺少 aweme_detail')
+                        raise ValueError(self._upstream_error_message(
+                            response,
+                            '上游响应缺少 aweme_detail',
+                        ))
                     item = handle_work_info(detail)
                     items.append(item)
                     logger.info('[{}] 抓取作品成功 url={}', request_id, safe_work_url)
@@ -240,7 +299,12 @@ class SpiderService:
                     raise
                 except Exception as error:
                     error_type = self._safe_error(error)
-                    errors.append({'url': safe_work_url, 'error': error_type})
+                    error_message = self._safe_error_message(error)
+                    errors.append({
+                        'url': safe_work_url,
+                        'error': error_type,
+                        'message': error_message,
+                    })
                     logger.error('[{}] 抓取作品失败 url={} error={}', request_id, safe_work_url, error_type)
 
             if not items:
@@ -274,7 +338,7 @@ class SpiderService:
                     str(count),
                 )
                 if not isinstance(response, dict) or 'comments' not in response:
-                    raise ValueError('上游响应缺少 comments')
+                    raise ValueError(self._upstream_error_message(response, '上游响应缺少 comments'))
                 comments = response.get('comments')
                 if comments is None:
                     comments = []
@@ -307,6 +371,7 @@ class SpiderService:
                 raise
             except Exception as error:
                 error_type = self._safe_error(error)
+                error_message = self._safe_error_message(error)
                 logger.error(
                     '[{}] 抓取视频评论失败 url={} cursor={} count={} error={}',
                     request_id,
@@ -315,7 +380,7 @@ class SpiderService:
                     count,
                     error_type,
                 )
-                raise UpstreamServiceError('视频评论抓取失败') from error
+                raise UpstreamServiceError(f'视频评论抓取失败：{error_message}') from error
 
             logger.info(
                 '[{}] 视频评论抓取完成 url={} cursor={} next_cursor={} total={} has_more={}',
@@ -357,7 +422,7 @@ class SpiderService:
                     str(count),
                 )
                 if not isinstance(response, dict) or 'comments' not in response:
-                    raise ValueError('上游响应缺少 comments')
+                    raise ValueError(self._upstream_error_message(response, '上游响应缺少 comments'))
                 comments = response.get('comments')
                 if comments is None:
                     comments = []
@@ -390,6 +455,7 @@ class SpiderService:
                 raise
             except Exception as error:
                 error_type = self._safe_error(error)
+                error_message = self._safe_error_message(error)
                 logger.error(
                     '[{}] 抓取二级评论失败 video_id={} comment_id={} cursor={} count={} error={}',
                     request_id,
@@ -399,7 +465,7 @@ class SpiderService:
                     count,
                     error_type,
                 )
-                raise UpstreamServiceError('二级评论抓取失败') from error
+                raise UpstreamServiceError(f'二级评论抓取失败：{error_message}') from error
 
             logger.info(
                 '[{}] 二级评论抓取完成 video_id={} comment_id={} cursor={} next_cursor={} total={} has_more={}',
@@ -437,10 +503,6 @@ class SpiderService:
                     # 用户作品接口直接使用主页路径中的 sec_user_id。
                     resolved_user_url = f'https://www.douyin.com/user/{user_id}'
 
-                user_response = self.douyin_api.get_user_info(auth, resolved_user_url)
-                user = user_response.get('user') if isinstance(user_response, dict) else None
-                if not isinstance(user, dict):
-                    raise ValueError('上游响应缺少 user')
                 works = self.douyin_api.get_user_some_work_info(auth, resolved_user_url, page_num)
                 if not isinstance(works, list):
                     raise ValueError('上游作品列表格式错误')
@@ -451,11 +513,6 @@ class SpiderService:
                         continue
                     # 复制原始数据，避免修改上游返回对象
                     merged_work = deepcopy(work)
-                    author = merged_work.get('author')
-                    if not isinstance(author, dict):
-                        author = {}
-                    author.update(user)
-                    merged_work['author'] = author
                     item = handle_work_info(merged_work)
                     items.append(item)
                     logger.info('[{}] 抓取用户作品成功 url={}', request_id, item['work_url'])
@@ -463,13 +520,14 @@ class SpiderService:
                 raise
             except Exception as error:
                 error_type = self._safe_error(error)
+                error_message = self._safe_error_message(error)
                 logger.error(
                     '[{}] 抓取用户作品失败 url={} error={}',
                     request_id,
                     self._safe_url_for_log(user_url or f'https://www.douyin.com/user/{user_id}'),
                     error_type,
                 )
-                raise UpstreamServiceError('用户作品抓取失败') from error
+                raise UpstreamServiceError(f'用户作品抓取失败：{error_message}') from error
 
             logger.info('[{}] 用户作品抓取完成 pages={} total={}', request_id, page_num, len(items))
             return {
@@ -496,6 +554,11 @@ class SpiderService:
                     True,
                 )
                 if isinstance(search_result, dict):
+                    if search_result.get('status_code') not in (None, 0, '0'):
+                        raise ValueError(self._upstream_error_message(
+                            search_result,
+                            '上游搜索返回非零业务码',
+                        ))
                     works = search_result.get('items')
                     has_more = search_result.get('has_more')
                     raw_page_counts = search_result.get('raw_page_counts')
@@ -520,18 +583,19 @@ class SpiderService:
                         continue
                     item = handle_work_info(aweme_info)
                     items.append(item)
-                    logger.info('[{}] 搜索作品成功 url={}', request_id, item['work_url'])
+                    # logger.info('[{}] 搜索作品成功 url={}', request_id, item['work_url'])
             except (DouyinAuthenticationError, DouyinRiskControlError):
                 raise
             except Exception as error:
                 error_type = self._safe_error(error)
+                error_message = self._safe_error_message(error)
                 logger.error(
                     '[{}] 搜索作品失败 query_length={} error={}',
                     request_id,
                     len(request_data.query),
                     error_type,
                 )
-                raise UpstreamServiceError('作品搜索失败') from error
+                raise UpstreamServiceError(f'作品搜索失败：{error_message}') from error
 
             logger.info(
                 '[{}] 搜索作品完成 query_length={} total={}',
@@ -547,11 +611,21 @@ class SpiderService:
                 'raw_page_counts': raw_page_counts,
             }
 
-        return self._execute_with_failover(
-            operation,
-            request_id,
-            target_account_id=getattr(request_data, 'target_account_id', None),
-        )
+        with self._search_lock:
+            now = time.monotonic()
+            if self._last_search_started_at is not None:
+                remaining = (
+                    self.search_videos_interval_seconds
+                    - (now - self._last_search_started_at)
+                )
+                if remaining > 0:
+                    time.sleep(remaining)
+            self._last_search_started_at = time.monotonic()
+            return self._execute_with_failover(
+                operation,
+                request_id,
+                target_account_id=getattr(request_data, 'target_account_id', None),
+            )
 
     def account_stats(self) -> dict:
         return self.account_pool.stats()

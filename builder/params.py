@@ -6,6 +6,7 @@ from utils.dy_util import (
     splice_url,
     generate_a_bogus,
     generate_a_bogus_bdms,
+    BDMS_A_BOGUS_TAIL_LENGTH,
     generate_fake_webid,
 )
 
@@ -54,15 +55,24 @@ class Params:
         self.params['webid'] = webid
         return self
 
-    def with_a_bogus(self, data=None, api_path=""):
+    def with_a_bogus(
+            self,
+            data=None,
+            api_path="",
+            bdms_tail_length=BDMS_A_BOGUS_TAIL_LENGTH):
         query = splice_url(self.get())
         if data is not None:
             data = splice_url(data)
         else:
             data = ''
         if api_path:
-            # 二级评论使用 bdms JavaScript 签名。
-            abogus = generate_a_bogus_bdms(api_path, query, body=data or None)
+            # 指定接口路径时使用 bdms JavaScript 签名。
+            abogus = generate_a_bogus_bdms(
+                api_path,
+                query,
+                body=data or None,
+                tail_length=bdms_tail_length,
+            )
         else:
             abogus = generate_a_bogus(query, data)
         self.add_param('a_bogus', abogus)

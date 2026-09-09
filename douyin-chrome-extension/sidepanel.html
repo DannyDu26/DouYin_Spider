@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>短视频数据助手</title>
+    <link rel="stylesheet" href="sidepanel.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand-mark" aria-hidden="true">DC</div>
+      <div>
+        <h1>短视频数据助手</h1>
+        <p id="page-summary">正在识别当前页面</p>
+      </div>
+      <button id="refresh-context" class="icon-button" type="button" title="重新检测">↻</button>
+    </header>
+
+    <main>
+      <section id="session-banner" class="session-banner is-loading" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <div>
+          <strong id="session-title">正在检测登录状态</strong>
+          <p id="session-detail">读取当前 Chrome 的平台 Cookie</p>
+        </div>
+        <button id="open-douyin" class="secondary-button" type="button" hidden>打开平台</button>
+      </section>
+
+      <nav class="mode-tabs" aria-label="抓取功能">
+        <button class="mode-tab is-active" type="button" data-mode="search">搜索</button>
+        <button class="mode-tab" type="button" data-mode="user">用户作品</button>
+        <button class="mode-tab" type="button" data-mode="comments">评论</button>
+      </nav>
+
+      <section class="form-section">
+        <form id="search-form" class="crawler-form" data-form="search">
+          <label class="field field-wide">
+            <span>搜索关键词</span>
+            <input id="search-keyword" name="keyword" maxlength="100" required placeholder="输入关键词">
+          </label>
+          <label class="field">
+            <span>结果数量</span>
+            <input name="limit" type="number" min="1" max="100" value="25" required>
+          </label>
+          <label class="field">
+            <span>请求间隔</span>
+            <select name="interval">
+              <option value="1000">1 秒</option>
+              <option value="2000" selected>2 秒</option>
+              <option value="3000">3 秒</option>
+              <option value="5000">5 秒</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>排序方式</span>
+            <select name="sortType">
+              <option value="0">综合排序</option>
+              <option value="1">最多点赞</option>
+              <option value="2">最新发布</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>发布时间</span>
+            <select name="publishTime">
+              <option value="0">不限</option>
+              <option value="1">一天内</option>
+              <option value="7">一周内</option>
+              <option value="180">半年内</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>视频时长</span>
+            <select name="duration">
+              <option value="">不限</option>
+              <option value="0-1">一分钟内</option>
+              <option value="1-5">一至五分钟</option>
+              <option value="5-10000">五分钟以上</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>搜索范围</span>
+            <select name="searchRange">
+              <option value="0">不限</option>
+              <option value="1">最近看过</option>
+              <option value="2">还未看过</option>
+              <option value="3">关注的人</option>
+            </select>
+          </label>
+          <label class="field field-wide">
+            <span>内容类型</span>
+            <select name="contentType">
+              <option value="0">不限</option>
+              <option value="1">视频</option>
+              <option value="2">图文</option>
+            </select>
+          </label>
+        </form>
+
+        <form id="user-form" class="crawler-form" data-form="user" hidden>
+          <label class="field field-wide">
+            <span>用户主页或 sec_user_id</span>
+            <input id="user-id" name="userId" required placeholder="粘贴主页链接或用户 ID">
+          </label>
+          <label class="field">
+            <span>数量</span>
+            <select name="limit">
+              <option value="18" selected>18</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+              <option value="500">500</option>
+              <option value="1000">1000</option>
+              <option value="5000">5000</option>
+              <option value="10000">10000</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>请求间隔</span>
+            <select name="interval">
+              <option value="1000">1 秒</option>
+              <option value="2000" selected>2 秒</option>
+              <option value="3000">3 秒</option>
+              <option value="5000">5 秒</option>
+            </select>
+          </label>
+        </form>
+
+        <form id="comments-form" class="crawler-form" data-form="comments" hidden>
+          <label class="field field-wide">
+            <span>作品链接或作品 ID</span>
+            <input id="comments-video-id" name="videoId" required placeholder="粘贴作品链接或数字 ID">
+          </label>
+          <label class="field field-wide">
+            <span>数量</span>
+            <select name="limit">
+              <option value="20">20</option>
+              <option value="50">50</option>
+              <option value="100" selected>100</option>
+              <option value="200">200</option>
+              <option value="500">500</option>
+              <option value="1000">1000</option>
+              <option value="5000">5000</option>
+              <option value="10000">10000</option>
+            </select>
+            <small class="field-hint">最多采集 1 万条</small>
+          </label>
+          <label class="field">
+            <span>请求间隔</span>
+            <select name="interval">
+              <option value="1000">1 秒</option>
+              <option value="2000" selected>2 秒</option>
+              <option value="3000">3 秒</option>
+              <option value="5000">5 秒</option>
+            </select>
+          </label>
+          <label class="toggle-field field-wide">
+            <span class="toggle-copy">
+              <strong>评论范围</strong>
+              <small>关闭时只采集一级评论</small>
+            </span>
+            <span class="toggle-control">
+              <span>包含回复</span>
+              <input name="includeReplies" type="checkbox">
+              <span class="toggle-track" aria-hidden="true"></span>
+            </span>
+          </label>
+        </form>
+
+        <div class="action-row">
+          <button id="run-button" class="primary-button" type="button">开始抓取</button>
+          <button id="stop-button" class="danger-button" type="button" hidden>停止</button>
+        </div>
+        <p id="task-status" class="task-status" aria-live="polite"></p>
+      </section>
+
+      <section id="result-section" class="result-section" hidden>
+        <div class="result-toolbar">
+          <div>
+            <h2>抓取结果</h2>
+            <p id="result-summary"></p>
+          </div>
+          <div class="toolbar-actions">
+            <button id="copy-json" class="icon-button" type="button" title="复制 JSON">⧉</button>
+            <button id="download-json" class="icon-button format-button" type="button" title="下载 JSON">JSON</button>
+            <button id="download-csv" class="icon-button format-button" type="button" title="下载 CSV">CSV</button>
+          </div>
+        </div>
+        <div id="result-list" class="result-list"></div>
+        <details class="raw-output">
+          <summary>原始 JSON</summary>
+          <pre id="raw-json"></pre>
+        </details>
+      </section>
+    </main>
+
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>
