@@ -610,7 +610,7 @@ def test_invalid_user_homepage_is_a_422_parameter_error(client, user_url):
     assert response.json()['error']['code'] == 'INVALID_REQUEST'
 
 
-def test_user_works_returns_normalized_data_without_profile_request(client, fake_api):
+def test_user_works_merges_profile_before_normalizing(client, fake_api):
     response = client.post('/api/v1/douyin/user_videos', json={
         'user_url': 'https://www.douyin.com/user/sec-user',
         'page_num': 2,
@@ -618,8 +618,9 @@ def test_user_works_returns_normalized_data_without_profile_request(client, fake
     body = response.json()
     assert response.status_code == 200
     assert body['data']['total'] == 2
-    assert body['data']['items'][0]['nickname'] == '测试用户'
-    assert fake_api.user_info_calls == 0
+    assert body['data']['items'][0]['nickname'] == '主页昵称'
+    assert body['data']['items'][0]['follower_count'] == 88
+    assert fake_api.user_info_calls == 1
 
 
 def test_user_works_accepts_user_id(client, fake_api):
@@ -638,10 +639,37 @@ def test_user_works_accepts_user_id(client, fake_api):
     assert fake_api.work_info_urls == []
 
 
+@pytest.mark.parametrize('user_url', [
+    'https://www.douyin.com/user/sec-user',
+    'https://www.douyin.com/user/sec-user/?from_tab_name=main&vid=123',
+    'https://www.douyin.com/user/' + 'a' * 100 + '?from_tab_name=main&vid=123',
+])
+def test_user_id_accepts_homepage_url(client, fake_api, user_url):
+    # 链接自动识别，并完整传递给上游作为主页地址。
+    response = client.post('/api/v1/douyin/user_videos', json={
+        'user_id': user_url, 'page_num': 2,
+    })
+    assert response.status_code == 200
+    assert response.json()['data']['user_url'] == user_url
+    assert fake_api.user_work_args[1:] == (user_url, 2)
+
+
 @pytest.mark.parametrize('payload', [
     {},
     {'user_url': 'https://www.douyin.com/user/sec-user', 'user_id': 'sec-user'},
     {'user_id': 'invalid/user'},
+    {'user_id': 'a' * 129},
+    {'user_id': ''},
+    {'user_id': 'http://www.douyin.com/user/sec-user'},
+    {'user_id': 'https://example.com/user/sec-user'},
+    {'user_id': 'https://www.douyin.com.evil.com/user/sec-user'},
+    {'user_id': 'https://name:password@www.douyin.com/user/sec-user'},
+    {'user_id': 'https://www.douyin.com/video/123'},
+    {'user_id': 'https://www.douyin.com/user/'},
+    {'user_id': 'https://www.douyin.com/user/sec-user?x=' + 'a' * 2048},
+    {'user_id': 'https://www.douyin.com/user/sec-user\n'},
+    {'user_id': 'https://www.douyin.com/user/sec-user',
+     'user_url': 'https://www.douyin.com/user/sec-user'},
     {'video_id': '101'},
 ])
 def test_user_works_locator_validation(client, payload):

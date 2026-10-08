@@ -336,7 +336,7 @@ curl -X POST "http://127.0.0.1:5000/api/v1/douyin/user_videos" \
   }'
 ~~~
 
-user_id 与 user_url 二选一；user_id 是用户主页 `/user/{id}` 路径中的 ID（即 sec_user_id）。page_num 默认 1，范围为 1–10。
+`user_id` 自动识别用户 ID（主页 `/user/{id}` 路径中的 sec_user_id）或完整 HTTPS 抖音主页链接，例如 `"user_id": "https://www.douyin.com/user/MS4wLjABAAAA-example?from_tab_name=main"`。原来的 `user_url` 参数仍兼容，与 `user_id` 二选一。`page_num` 默认 1，范围为 1–10。
 
 ### 搜索作品
 

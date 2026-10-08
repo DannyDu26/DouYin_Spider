@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { md5, signWebUrl } from "../lib/web-sign.js";
 
 import { ABogusSigner } from "../lib/abogus.js";
 import {
@@ -59,6 +61,9 @@ function testCoreHelpers() {
     ).referrer,
     "https://www.douyin.com/user/MS4wLjABAAAA-test?from_tab_name=main",
   );
+  for (const value of ["https://example.com/user/abc", "https://user:pass@www.douyin.com/user/abc", "a".repeat(129)]) {
+    assert.throws(() => normalizeUserId(value));
+  }
   assert.equal(buildQuery({ keyword: "剑网3", filter: '{"a":"1/2"}' }), "keyword=%E5%89%91%E7%BD%913&filter=%7B%22a%22%3A%221/2%22%7D");
   assert.equal(parseCompactCount("3346"), 3346);
   assert.equal(parseCompactCount("1.5万"), 15000);
@@ -92,6 +97,20 @@ function testPureSignatureVector() {
   const query = "device_platform=webapp&aid=6383&keyword=%E5%89%91%E7%BD%913";
   const expected = "df0bgq6idxW5cdMSuObNSHnlrHnMNkWyj0J/WmoP9xzUbwlTXbYeYYOWaxqO4MdkpWpwiFV71jUMYxncFhwTZAHkLmpDSmwWkUA5V66oZ1wXbMiQLNfBCwuLeJ7bWOvEmAojJ1UlWtmO2dC4LpaTUBlJt/PNsmipQHabdc4aE9ef6zT9Bqq2uxSdO7zqHD==";
   assert.equal(new ABogusSigner({ fixed: true }).signQuery(query), expected);
+}
+
+function testUserSignatures() {
+  // 与已验证的 Python 主站签名使用同一固定向量。
+  const query = "aid=6383&sec_user_id=sec-user&whale_cut_token=&msToken=test-token";
+  const expected = "df0bgq6idxW5cdMSuOTES1nlrHnMNsWyOzJ/WSol9PLlbwUGXbYeYYOWaxqEbMdfpWpwiFV7ZdGMYnncF07TZCHkLmpDSmwWkUA5V66oZ1wXbMiQLNfBCw8LeJtbWOvEmAojJ1UlWtmO2dC4LpaTUBlytApismipQHabdc4aE9ef6zT9Bqq2uxSdO7zq0E==";
+  assert.equal(new ABogusSigner({ fixed: true, mainSite: true }).signQuery(query), expected);
+  for (const text of ["", "abc", "中文 / + 😀", "x".repeat(1000)]) {
+    assert.equal(md5(text), createHash("md5").update(text).digest("hex"));
+  }
+  const url = "https://www.douyin.com/aweme/v1/web/aweme/post/?name=%E4%B8%AD%E6%96%87&a=hello+world&whale_cut_token=&a_bogus=A%2BB%3D&verifyFp=fp";
+  const signed = signWebUrl(url, { timestamp: 1720000000, uifid: "test-uifid" });
+  assert.equal(signed, "https://www.douyin.com/aweme/v1/web/aweme/post/?name=%E4%B8%AD%E6%96%87&a=hello%20world&whale_cut_token=&a_bogus=A%2BB%3D&verifyFp=fp&uifid=test-uifid&timestamp=1720000000&x-secsdk-web-signature=1d6fa9db8186ec94a7f180534edf09c2");
+  assert.equal(signWebUrl(signed, { timestamp: 1720000000 }), signed);
 }
 
 function testMsTokenReportBody() {
@@ -136,6 +155,7 @@ function createClient(
       osVersion: "10",
     },
     cookieMap: cookieMap || {
+      UIFID: "test-uifid",
       sessionid: "session",
       s_v_web_id: "verify_test",
       msToken: "token",
@@ -264,15 +284,36 @@ async function testApiFlows() {
     [...userRequestUrl.searchParams.keys()].indexOf("publish_video_strategy_type")
       < [...userRequestUrl.searchParams.keys()].indexOf("update_version_code"),
   );
-  assert.equal(userRequestUrl.searchParams.has("uifid"), false);
-  assert.equal(userRequestUrl.searchParams.has("timestamp"), false);
-  assert.equal(userRequestUrl.searchParams.has("x-secsdk-web-signature"), false);
+  assert.equal(userRequestUrl.searchParams.get("uifid"), "test-uifid");
+  assert.equal(userRequestUrl.searchParams.get("from_user_page"), "1");
+  assert.equal(userRequestUrl.searchParams.get("pc_libra_divert"), "Windows");
+  assert.equal(userRequestUrl.searchParams.get("support_h265"), "1");
+  assert.equal(userRequestUrl.searchParams.get("support_dash"), "1");
+  assert.equal(userRequestUrl.searchParams.get("round_trip_time"), "0");
+  assert.match(userRequestUrl.searchParams.get("timestamp"), /^\d+$/);
+  assert.match(userRequestUrl.searchParams.get("x-secsdk-web-signature"), /^[a-f0-9]{32}$/);
+  const keys = [...userRequestUrl.searchParams.keys()];
+  assert.ok(keys.indexOf("a_bogus") < keys.indexOf("verifyFp"));
+  assert.ok(keys.indexOf("fp") < keys.indexOf("timestamp"));
   assert.equal(
     userCalls.userRequests[0].referrer,
     "https://www.douyin.com/user/MS4wLjABAAAA-test?from_tab_name=main&vid=123",
   );
   // 用户作品接口使用纯签名，不应调用 BDMS。
   assert.equal(userCalls.signatures.length, 0);
+
+  // 同一 userId 参数也可以直接接收完整主页链接。
+  const fullUrl = "https://www.douyin.com/user/MS4wLjABAAAA-test/?from_tab_name=main&vid=123";
+  await userClient.getUserWorks({ userId: fullUrl, limit: 1, interval: 0 });
+  const lastUserRequest = userCalls.userRequests.at(-1);
+  assert.equal(new URL(lastUserRequest.url).searchParams.get("sec_user_id"), "MS4wLjABAAAA-test");
+  assert.equal(lastUserRequest.referrer, fullUrl);
+
+  const invalidListClient = createClient((request) => ({
+    status: 200, finalUrl: request.url, text: JSON.stringify({ status_code: 0 }),
+  }), { signatures: [], requests: [] });
+  await assert.rejects(invalidListClient.getUserWorks({ userId: "sec-user", limit: 18 }),
+    (error) => error.code === "INVALID_RESPONSE");
 
   const userPagingCalls = { signatures: [], requests: [] };
   const userPagingClient = createClient((request) => {
@@ -554,6 +595,7 @@ async function testApiFlows() {
 
 testCoreHelpers();
 testPureSignatureVector();
+testUserSignatures();
 testMsTokenReportBody();
 await testApiFlows();
 console.log("chrome-extension tests: PASS");

@@ -7,6 +7,7 @@ const MSTOKEN_HEADER_RULE_ID = 910001;
 const USER_WORK_HEADER_RULE_ID = 910002;
 let msTokenCache = { token: "", timestamp: 0 };
 let msTokenRequest = null;
+let userWorkQueue = Promise.resolve();
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
@@ -41,6 +42,7 @@ async function setMsTokenRequestHeaders(ttwid, userAgent) {
       },
       condition: {
         urlFilter: "||mssdk.bytedance.com/web/common",
+        initiatorDomains: [chrome.runtime.id],
         resourceTypes: ["xmlhttprequest"],
       },
     }],
@@ -99,6 +101,7 @@ async function setUserWorkRequestHeaders(message) {
       },
       condition: {
         urlFilter: "||www.douyin.com/aweme/v1/web/aweme/post/",
+        initiatorDomains: [chrome.runtime.id],
         resourceTypes: ["xmlhttprequest"],
       },
     }],
@@ -123,11 +126,17 @@ async function fetchUserWorks(message) {
   ) {
     throw new Error("用户作品请求地址不合法");
   }
-  for (const name of ["uifid", "timestamp", "x-secsdk-web-signature"]) {
-    if (url.searchParams.has(name)) {
-      throw new Error(`用户作品请求不应包含 ${name}`);
-    }
+  // 与后端一致，作品请求必须已完成双签名；直接发送，不能再次编码。
+  if (!url.searchParams.get("a_bogus")
+    || !/^\d+$/.test(url.searchParams.get("timestamp") || "")
+    || !/^[a-f0-9]{32}$/.test(url.searchParams.get("x-secsdk-web-signature") || "")) {
+    throw new Error("用户作品请求缺少有效签名");
   }
+  const referrer = new URL(message.referrer);
+  if (referrer.protocol !== "https:"
+    || !(referrer.hostname === "douyin.com" || referrer.hostname.endsWith(".douyin.com"))
+    || !/^\/user\/[^/]+\/?$/.test(referrer.pathname)
+    || referrer.username || referrer.password) throw new Error("用户主页地址不合法");
 
   await setUserWorkRequestHeaders(message);
   const controller = new AbortController();
@@ -137,11 +146,9 @@ async function fetchUserWorks(message) {
       method: "GET",
       headers: {
         accept: "application/json, text/plain, */*",
-        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
-        "cache-control": "no-cache",
-        pragma: "no-cache",
+        "accept-language": message.acceptLanguage || "zh-CN,zh;q=0.9,en;q=0.8",
+        ...(url.searchParams.get("uifid") ? { uifid: url.searchParams.get("uifid") } : {}),
       },
-      cache: "no-store",
       credentials: "omit",
       signal: controller.signal,
     });
@@ -240,7 +247,10 @@ async function handleMessage(message) {
   }
 
   if (message?.type === "FETCH_USER_WORKS") {
-    return { ok: true, response: await fetchUserWorks(message) };
+    // 临时请求头规则是共享资源，多侧栏请求必须顺序执行。
+    const task = userWorkQueue.then(() => fetchUserWorks(message));
+    userWorkQueue = task.catch(() => {});
+    return { ok: true, response: await task };
   }
   throw new Error("不支持的插件消息");
 }

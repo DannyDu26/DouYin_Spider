@@ -10,6 +10,9 @@ downloads/
 eggs/
 .eggs/
 lib/
+# 浏览器扩展的 lib 是运行必需源码，不是 Python 构建目录。
+!douyin-chrome-extension/lib/
+!douyin-chrome-extension/lib/*.js
 lib64/
 parts/
 sdist/

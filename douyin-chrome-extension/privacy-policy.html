@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="短视频数据助手 Chrome 扩展隐私政策：说明登录 Cookie、浏览器信息、作品和评论数据的处理、传输、保存与删除方式。">
+  <meta name="color-scheme" content="light">
+  <title>隐私政策 · 短视频数据助手</title>
+  <style>
+    /* 使用系统字体和本地样式，阅读政策无需加载外部资源。 */
+    :root { font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; color: #202b3c; background: #f5f7fa; line-height: 1.85; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { width: min(900px, calc(100% - 32px)); margin: 40px auto; padding: 44px; background: #fff; border: 1px solid #e2e7ee; border-radius: 16px; }
+    .eyebrow { color: #365c82; font-size: 14px; letter-spacing: .06em; }
+    h1 { margin: 8px 0; font-size: clamp(28px, 5vw, 38px); line-height: 1.35; }
+    h2 { margin: 34px 0 10px; font-size: 21px; line-height: 1.5; }
+    p, ul { margin: 10px 0; }
+    ul { padding-left: 24px; }
+    li + li { margin-top: 8px; }
+    a { color: #175dad; overflow-wrap: anywhere; text-underline-offset: 3px; }
+    a:focus-visible { outline: 3px solid #175dad; outline-offset: 4px; }
+    code { font-size: .9em; overflow-wrap: anywhere; }
+    .meta, footer { color: #586779; font-size: 14px; }
+    .notice { margin: 24px 0; padding: 16px 20px; border-left: 4px solid #426c98; background: #f0f5fb; border-radius: 0 8px 8px 0; }
+    footer { margin-top: 36px; border-top: 1px solid #e2e7ee; padding-top: 20px; }
+    @media (max-width: 600px) { main { margin: 16px auto; padding: 24px 20px; } }
+    @media print { :root { background: white; } main { width: 100%; border: 0; margin: 0; padding: 0; } h2 { break-after: avoid; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">短视频数据助手 / PRIVACY POLICY</div>
+      <h1>隐私政策</h1>
+      <p class="meta">生效及最后更新日期：2026 年 9 月 14 日<br>适用产品：短视频数据助手（Chrome 扩展；本政策对应版本 0.1.20）</p>
+    </header>
+
+    <p>本政策说明“短视频数据助手”（以下简称“本扩展”）如何访问、使用、保存和传输数据。本扩展使用您当前 Chrome 浏览器中的抖音登录状态，按您的操作查询搜索作品、用户作品、评论及回复，并提供本地预览、复制以及 JSON / CSV 导出。</p>
+    <p>本扩展由项目维护者 DannyDu26 维护，项目地址为 <a href="https://github.com/DannyDu26/DouYin_Spider">DannyDu26/DouYin_Spider</a>。本扩展并非抖音或字节跳动的官方产品。本政策适用于该 Chrome 扩展，不涵盖仓库中的其他独立程序。</p>
+    <div class="notice"><strong>数据处理要点：</strong>本扩展会访问登录 Cookie 和当前页面信息，并向抖音及字节跳动的指定接口发送完成查询所需的数据。采集结果保留在扩展界面的内存中；查询参数及备用验证标识保存在您的浏览器本地。当前版本未设置开发者用于接收扩展业务数据的服务器。</div>
+
+    <section aria-labelledby="data">
+      <h2 id="data">1. 访问和处理的数据</h2>
+      <ul>
+        <li><strong>登录与会话信息：</strong>读取抖音域名下的 Cookie，包括登录状态标识、<code>ttwid</code>、<code>msToken</code>、<code>s_v_web_id</code> 等实际存在的字段，用于判断登录状态、构造经身份验证的请求及完成接口验证。扩展不要求您输入账号密码，但读取的会话 Cookie 属于敏感认证信息。</li>
+        <li><strong>当前标签页和页面内容：</strong>读取当前操作标签页的 URL，在抖音页面中识别搜索关键词、用户主页标识及作品 ID；读取必要的页面内容、页面 Cookie 和本地存储以提取 <code>webid</code>、验证标识及登录状态。用户作品接口无法返回结果时，可读取并滚动当前目标用户主页中的作品列表。</li>
+        <li><strong>浏览器与设备环境：</strong>读取浏览器 User-Agent、版本、语言、平台或操作系统信息、CPU 并发数、设备内存、屏幕及窗口尺寸等，用于请求参数、签名和平台验证。缺少相关标识时，会生成备用验证标识或临时数字标识。</li>
+        <li><strong>您输入的查询条件：</strong>包括关键词、用户链接或 ID、作品链接或 ID、数量、排序、筛选条件及是否包含回复等，用于执行任务和恢复表单。</li>
+        <li><strong>查询结果：</strong>包括平台返回的作品描述、作品与用户标识、昵称、发布时间、点赞/评论/转发/收藏数量、评论正文及回复关系。原始 JSON 可能包含平台返回的其他个人信息字段，例如头像链接、个人资料或地区信息（以实际返回内容为准）；公开可见的数据仍可能属于个人信息。</li>
+      </ul>
+      <p>本扩展不建立全站浏览历史数据库；标签页和导航信息用于识别当前操作上下文及抖音站内页面切换。</p>
+    </section>
+
+    <section aria-labelledby="usage">
+      <h2 id="usage">2. 数据用途与接收方</h2>
+      <p>上述数据仅用于本扩展的登录检测、查询请求、请求验证、页面识别、本地预览、导出和设置恢复。打开侧边栏或切换相关页面时可能触发上下文及登录检测；作品和评论查询由您启动。</p>
+      <ul>
+        <li><strong>抖音接口：</strong>查询请求发送至 <code>https://douyin.com/*</code> 及 <code>https://*.douyin.com/*</code> 范围内的相关服务。请求可能携带查询条件、用户/作品标识、会话 Cookie、浏览器信息及验证参数。</li>
+        <li><strong>字节跳动验证接口：</strong>查询用户作品时，扩展向 <code>https://mssdk.bytedance.com/web/common</code> 发送验证请求，包括 <code>ttwid</code>（如存在）、User-Agent、时间戳以及包含硬件和窗口信息的编码验证数据，以获取动态 <code>msToken</code>。编码处理不代表这些信息不会被接收方处理。</li>
+        <li><strong>您选择的本地输出：</strong>点击导出会将结果保存到您设备上的文件；点击复制会将 JSON 写入系统剪贴板。此后文件、剪贴板及其可能的系统同步由您和相关软件管理。</li>
+      </ul>
+      <p>网络服务接收方也会因连接获得 IP 地址等网络信息。抖音和字节跳动作为其平台服务提供方，按自身隐私政策处理收到的信息；本扩展维护者不控制其保存期限或后续处理。</p>
+      <p>当前版本不将登录 Cookie、查询条件或采集结果上传至开发者服务器，不出售用户数据，不用于广告投放、信用评估或与本扩展功能无关的跟踪，也未集成独立的广告或用户行为分析服务。</p>
+      <p><strong>有限使用声明：</strong>本扩展对用户数据的使用和传输遵守 <a href="https://developer.chrome.com/docs/webstore/program-policies/user-data-faq">Chrome 应用商店用户数据政策</a>，包括 Limited Use（有限使用）要求：仅为上述面向用户的功能处理数据，仅向实现这些功能所必需的平台接口传输数据，不用于个性化广告。维护者不会通过本扩展远程人工查看您的会话数据或查询结果。</p>
+    </section>
+
+    <section aria-labelledby="storage">
+      <h2 id="storage">3. 保存位置、期限与安全措施</h2>
+      <ul>
+        <li><strong>本地设置：</strong>表单条件、功能模式和备用验证标识保存在 <code>chrome.storage.local</code>，不使用 <code>chrome.storage.sync</code>；保留至被覆盖或扩展本地数据被清除。关键词和用户/作品标识也可能包含个人信息。</li>
+        <li><strong>会话数据：</strong>读取的 Cookie 在扩展运行内存中用于请求，不写入扩展持久存储；构造请求时可能临时写入浏览器会话请求头规则，请求结束后移除。平台原有 Cookie 由 Chrome 和平台管理。</li>
+        <li><strong>动态令牌：</strong><code>msToken</code> 在 Service Worker 内存中缓存，复用有效期为 10 分钟；到期后的新请求会重新获取，缓存也可能随工作进程终止而清除。</li>
+        <li><strong>查询结果：</strong>原始返回数据和结果保存在侧边栏运行内存中，不写入扩展数据库；关闭并销毁侧边栏页面或重新加载扩展会清除该运行内存。切换功能会清空界面中的上一份结果。已导出的文件不随之删除。</li>
+      </ul>
+      <p>扩展与上述平台接口通过 HTTPS 通信。界面的登录诊断展示 Cookie 名称或检测状态，不展示 Cookie 值。请妥善保管设备、浏览器配置文件和导出数据，避免将会话凭证发给他人。</p>
+    </section>
+
+    <section aria-labelledby="permissions">
+      <h2 id="permissions">4. Chrome 权限用途</h2>
+      <ul>
+        <li><code>activeTab</code>：识别用户当前操作的标签页。</li>
+        <li><code>cookies</code>：读取抖音登录会话及验证所需的 Cookie。</li>
+        <li><code>declarativeNetRequestWithHostAccess</code>：为用户作品及令牌请求临时调整 Cookie、Referer、User-Agent 等请求头。</li>
+        <li><code>scripting</code>：在抖音页面读取必要上下文、发起查询或读取作品列表。</li>
+        <li><code>sidePanel</code>：提供扩展操作界面。</li>
+        <li><code>storage</code>：保存查询表单、模式及备用验证标识。</li>
+        <li><code>webNavigation</code>：响应抖音单页应用内部 URL 切换，更新操作上下文。</li>
+        <li><strong>网站访问权限：</strong><code>https://douyin.com/*</code>、<code>https://*.douyin.com/*</code> 和 <code>https://mssdk.bytedance.com/*</code>，用于上述页面操作、平台查询及令牌验证。</li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="choices">
+      <h2 id="choices">5. 您的选择及删除方式</h2>
+      <p>您可以停止查询、关闭侧边栏，或在 Chrome 的扩展管理页面限制网站访问权限、停用或卸载本扩展。停用或收回必要权限后，相关功能将无法继续正常工作。</p>
+      <p>卸载扩展可清除其本地设置和备用验证标识；重新加载扩展可清除当前运行内存中的结果。导出的 JSON / CSV 文件及剪贴板内容需要您另行删除。卸载扩展不会清除抖音网站 Cookie，也不会删除已经发送给平台的数据；您可通过 Chrome 网站数据设置清除平台 Cookie，并向相应平台提出相关数据请求。</p>
+      <p>维护者没有通过本扩展集中保存您的业务数据，因此无法远程检索或删除您的本地导出文件。涉及平台账号或平台保存的数据，请同时联系对应平台。</p>
+    </section>
+
+    <section aria-labelledby="policy-page">
+      <h2 id="policy-page">6. 本隐私政策网页</h2>
+      <p>本政策网页无需登录即可阅读。网页内容本身不包含广告、分析脚本、表单或外部字体，也不会读取扩展 Cookie 或采集结果。网页托管服务可能为提供网络访问和安全防护处理 IP 地址、请求时间、浏览器信息等基础访问日志，具体由托管服务的规则管理。</p>
+    </section>
+
+    <section aria-labelledby="contact">
+      <h2 id="contact">7. 联系方式与政策更新</h2>
+      <p>如对隐私处理有疑问或需要提交相关请求，请通过 <a href="https://github.com/DannyDu26/DouYin_Spider/issues">项目 Issues</a> 联系维护者 DannyDu26，或使用 Chrome 应用商店该扩展详情页提供的开发者联系渠道。Issues 为公开渠道，请勿提交 Cookie、令牌或其他敏感个人信息。</p>
+      <p>当扩展的数据处理方式发生变化时，我们会更新本页面及“最后更新日期”。如新增处理行为需要您的授权，将在启用相关功能前提供相应说明并取得所需授权。</p>
+    </section>
+    <footer>短视频数据助手 · 隐私政策<br>请仅查询、保存和使用您有权处理的数据，并尊重相关人员的隐私。</footer>
+  </main>
+</body>
+</html>

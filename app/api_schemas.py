@@ -200,6 +200,9 @@ class UserWorksRequest(BaseModel):
         'examples': [{
             'user_id': 'MS4wLjABAAAA-example',
             'page_num': 1,
+        }, {
+            'user_id': 'https://www.douyin.com/user/MS4wLjABAAAA-example?from_tab_name=main',
+            'page_num': 1,
         }],
     })
 
@@ -211,10 +214,9 @@ class UserWorksRequest(BaseModel):
     user_id: str | None = Field(
         default=None,
         min_length=1,
-        max_length=128,
-        pattern=r'^[A-Za-z0-9._~-]+$',
-        description='用户主页 /user/{id} 路径中的用户 ID（sec_user_id）；与 user_url 二选一。',
-        examples=['MS4wLjABAAAA-example'],
+        max_length=MAX_URL_LENGTH,
+        description='自动识别用户 ID（sec_user_id）或完整 HTTPS 抖音主页链接；与旧参数 user_url 二选一。',
+        examples=['MS4wLjABAAAA-example', 'https://www.douyin.com/user/MS4wLjABAAAA-example'],
     )
     page_num: int = Field(
         default=1,
@@ -234,12 +236,33 @@ class UserWorksRequest(BaseModel):
             raise ValueError('用户链接必须使用 /user/{id} 路径')
         return value
 
+    @field_validator('user_id')
+    @classmethod
+    def validate_user_id(cls, value: str | None) -> str | None:
+        """同一字段接收 ID 或主页链接，链接仍执行域名和路径校验。"""
+        if value is None:
+            return None
+        if '://' in value:
+            return cls.validate_user_url(value)
+        if not re.fullmatch(r'[A-Za-z0-9._~-]{1,128}', value):
+            raise ValueError('user_id 必须是有效用户 ID 或 HTTPS 抖音主页链接')
+        return value
+
     @model_validator(mode='after')
     def validate_user_locator(self):
         """用户主页链接和用户 ID 必须且只能提供一个。"""
         if (self.user_url is None) == (self.user_id is None):
             raise ValueError('user_url 和 user_id 必须且只能提供一个')
         return self
+
+    @property
+    def resolved_user_url(self) -> str:
+        """统一为主页链接，完整链接保留原查询参数。"""
+        if self.user_url is not None:
+            return self.user_url
+        if self.user_id.startswith('https://'):
+            return self.user_id
+        return f'https://www.douyin.com/user/{self.user_id}'
 
 
 class SearchWorksRequest(BaseModel):

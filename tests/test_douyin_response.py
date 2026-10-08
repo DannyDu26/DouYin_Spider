@@ -1,6 +1,10 @@
 # coding=utf-8
 import json
 from types import SimpleNamespace
+from urllib.parse import parse_qsl, urlsplit
+
+from utils.user_read.client import UserReadClient
+from utils.user_read.params import Params as UserParams
 
 import pytest
 
@@ -23,6 +27,28 @@ class FakeResponse:
         self.url = url
         self.history = history or []
         self.headers = headers or {}
+        self.cookies = SimpleNamespace(get_dict=lambda: {})
+
+
+@pytest.fixture(autouse=True)
+def mock_user_transport(monkeypatch):
+    # 所有 HTTP 调用仍由各测试的 fake_get 接管，禁止测试访问真实上游。
+    from utils.user_read import client as client_module
+    monkeypatch.setattr(UserReadClient, 'webid', property(lambda self: 'test-webid'))
+    monkeypatch.setattr(
+        client_module.requests.Session, 'get',
+        lambda self, *args, **kwargs: douyin_module.requests.get(*args, **kwargs),
+    )
+
+
+def capture_user_request(args, kwargs):
+    # 从实际发送的 URL 读取签名参数，不依赖 requests 二次编码。
+    return {
+        **kwargs,
+        'url': args[0],
+        'params': dict(parse_qsl(urlsplit(args[0]).query, keep_blank_values=True)),
+        'has_params_argument': 'params' in kwargs,
+    }
 
 
 def test_http_authentication_failure_is_detected():
@@ -191,13 +217,13 @@ def test_user_work_request_uses_compatible_signature(monkeypatch):
         self.add_param('a_bogus', 'full-bdms-signature')
         return self
 
-    monkeypatch.setattr(Params, 'with_web_id', lambda self, *args, **kwargs: self)
-    monkeypatch.setattr(Params, 'with_a_bogus', fake_with_a_bogus)
+    monkeypatch.setattr(UserParams, 'with_web_id', lambda self, *args, **kwargs: self)
+    monkeypatch.setattr(UserParams, 'with_a_bogus', fake_with_a_bogus)
     monkeypatch.setattr(
         douyin_module.requests,
         'get',
         lambda *args, **kwargs: (
-            request_calls.append(kwargs)
+            request_calls.append(capture_user_request(args, kwargs))
             or FakeResponse(payload={
                 'status_code': 0,
                 'aweme_list': [],
@@ -218,8 +244,18 @@ def test_user_work_request_uses_compatible_signature(monkeypatch):
 
     assert signer_calls[0][0] == {}
     assert 'timestamp' not in signer_calls[0][1]
-    assert 'timestamp' not in request_calls[0]['params']
-    assert 'uifid' not in request_calls[0]['headers']
+    assert 'verifyFp' not in signer_calls[0][1]
+    assert 'fp' not in signer_calls[0][1]
+    assert signer_calls[0][1]['uifid'] == 'account-uifid'
+    sent = request_calls[0]
+    assert not sent['has_params_argument']
+    assert sent['headers']['uifid'] == 'account-uifid'
+    assert sent['params']['timestamp'].isdigit()
+    assert len(sent['params']['x-secsdk-web-signature']) == 32
+    assert sent['params']['from_user_page'] == '1'
+    assert sent['params']['whale_cut_token'] == ''
+    keys = list(sent['params'])
+    assert keys.index('a_bogus') < keys.index('verifyFp') < keys.index('timestamp')
 
 
 def test_user_work_retries_transient_403_with_new_signatures(monkeypatch):
@@ -248,7 +284,7 @@ def test_user_work_retries_transient_403_with_new_signatures(monkeypatch):
         return self
 
     def fake_get(*args, **kwargs):
-        request_calls.append(kwargs)
+        request_calls.append(capture_user_request(args, kwargs))
         if len(request_calls) < 3:
             return FakeResponse(status_code=403)
         return FakeResponse(payload={
@@ -257,8 +293,8 @@ def test_user_work_retries_transient_403_with_new_signatures(monkeypatch):
             'has_more': 0,
         })
 
-    monkeypatch.setattr(Params, 'with_web_id', lambda self, *args, **kwargs: self)
-    monkeypatch.setattr(Params, 'with_a_bogus', fake_with_a_bogus)
+    monkeypatch.setattr(UserParams, 'with_web_id', lambda self, *args, **kwargs: self)
+    monkeypatch.setattr(UserParams, 'with_a_bogus', fake_with_a_bogus)
     monkeypatch.setattr(douyin_module.requests, 'get', fake_get)
     monkeypatch.setattr(douyin_module.time, 'sleep', sleeps.append)
 
@@ -298,7 +334,7 @@ def test_user_work_single_403_does_not_refresh_token(monkeypatch):
             return 'fresh-token'
 
     def fake_get(*args, **kwargs):
-        request_calls.append(kwargs)
+        request_calls.append(capture_user_request(args, kwargs))
         if len(request_calls) == 1:
             return FakeResponse(status_code=403)
         return FakeResponse(payload={
@@ -307,8 +343,8 @@ def test_user_work_single_403_does_not_refresh_token(monkeypatch):
             'has_more': 0,
         })
 
-    monkeypatch.setattr(Params, 'with_web_id', lambda self, *args, **kwargs: self)
-    monkeypatch.setattr(Params, 'with_a_bogus', lambda self, *args, **kwargs: self)
+    monkeypatch.setattr(UserParams, 'with_web_id', lambda self, *args, **kwargs: self)
+    monkeypatch.setattr(UserParams, 'with_a_bogus', lambda self, *args, **kwargs: self)
     monkeypatch.setattr(douyin_module.requests, 'get', fake_get)
     monkeypatch.setattr(douyin_module.time, 'sleep', lambda *_: None)
     auth = RetryAuth()

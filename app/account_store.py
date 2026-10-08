@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+import hashlib
 import os
 import re
 from collections.abc import Mapping
@@ -54,8 +55,12 @@ class CredentialRecord:
     row_id: int
     account_id: str
     created_at: datetime | None
-    auth: DouyinAuth | None
+    auth: Any
     invalid_reason: str | None = None
+    revision: int = 0
+    fingerprint: str = ''
+    stored_cookie: str | None = None
+    stored_remark: str | None = None
 
     @property
     def id(self) -> int:
@@ -270,12 +275,14 @@ class MySQLCredentialStore:
             engine: Engine,
             project_id: int,
             credential_type: str = CREDENTIAL_TYPE,
+            codec=None,
     ):
         if isinstance(project_id, bool) or not isinstance(project_id, int) or project_id <= 0:
             raise ValueError('project_id 必须是正整数')
         self.engine = engine
         self.credential_type = credential_type
         self.project_id = project_id
+        self.codec = codec
         metadata = MetaData()
         # 仅声明现有表映射，不执行建表或迁移。
         self.table = Table(
@@ -291,7 +298,7 @@ class MySQLCredentialStore:
             Column('type', String(100), nullable=False),
             Column('account_id', String(100), nullable=False),
             Column('cookie', Text, nullable=False),
-            Column('remark', String(100)),
+            Column('remark', Text),
             Column('create_time', DateTime, nullable=False, server_default=func.current_timestamp()),
         )
 
@@ -435,6 +442,7 @@ class MySQLCredentialStore:
             select(
                 self.table.c.id,
                 self.table.c.cookie,
+                self.table.c.remark,
                 self.table.c.account_id,
                 self.table.c.create_time,
             )
@@ -466,7 +474,7 @@ class MySQLCredentialStore:
             account_id = row['account_id'] or ''
             try:
                 validate_account_id(account_id)
-                auth = deserialize_credential(row['cookie'])
+                auth = self.codec.decode(row['cookie'], row['remark']) if self.codec else deserialize_credential(row['cookie'])
                 invalid_reason = None
             except Exception as error:
                 auth = None
@@ -481,15 +489,19 @@ class MySQLCredentialStore:
                 created_at=row['create_time'],
                 auth=auth,
                 invalid_reason=invalid_reason,
+                revision=self.codec.revision(row['remark']) if self.codec and invalid_reason is None else 0,
+                fingerprint=self._fingerprint(row['cookie'], row['remark']) if self.codec else '',
+                stored_cookie=row['cookie'],
+                stored_remark=row['remark'],
             ))
         return records
 
     def insert(self, account_id: str, auth_or_payload: Any) -> CredentialRecord:
         """保存账号凭证；同一类型和账号已存在时更新最新记录。"""
         validate_account_id(account_id)
-        serialized = serialize_credential(auth_or_payload)
+        serialized = self.codec.cookie(auth_or_payload) if self.codec else serialize_credential(auth_or_payload)
         # 从待写入 Cookie 恢复，确保后续启动可以直接加载。
-        auth = deserialize_credential(serialized)
+        auth = auth_or_payload if self.codec else deserialize_credential(serialized)
         try:
             with self.engine.begin() as connection:
                 dialect_name = connection.dialect.name
@@ -509,8 +521,8 @@ class MySQLCredentialStore:
                     else account_id
                 )
                 # 锁定最新匹配记录，避免同一账号连续扫码时重复新增。
-                existing_id = connection.execute(
-                    select(self.table.c.id)
+                existing = connection.execute(
+                    select(self.table.c.id, self.table.c.remark)
                     .where(
                         self.table.c.project_id == self.project_id,
                         type_column == credential_type,
@@ -519,14 +531,20 @@ class MySQLCredentialStore:
                     .order_by(self.table.c.id.desc())
                     .limit(1)
                     .with_for_update()
-                ).scalar_one_or_none()
+                ).mappings().first()
 
-                if existing_id is None:
+                # 小红书 Cookie 与附加状态必须在同一事务内保存。
+                remark = self.codec.encode(auth, existing['remark'] if existing else None) if self.codec else None
+                values = {'cookie': serialized}
+                if self.codec:
+                    values['remark'] = remark
+
+                if existing is None:
                     result = connection.execute(self.table.insert().values(
                         project_id=self.project_id,
                         type=self.credential_type,
                         account_id=account_id,
-                        cookie=serialized,
+                        **values,
                     ))
                     row_id = result.inserted_primary_key[0]
                     if row_id is None:
@@ -534,12 +552,12 @@ class MySQLCredentialStore:
                     if row_id is None:
                         raise CredentialStoreError('数据库未返回新凭证 ID')
                 else:
-                    row_id = existing_id
+                    row_id = existing['id']
                     connection.execute(
                         self.table.update()
                         .where(self.table.c.id == row_id)
                         .values(
-                            cookie=serialized,
+                            **values,
                             create_time=func.current_timestamp(),
                         )
                     )
@@ -556,14 +574,53 @@ class MySQLCredentialStore:
             account_id=account_id,
             created_at=created_at,
             auth=auth,
+            revision=self.codec.revision(remark) if self.codec else 0,
+            fingerprint=self._fingerprint(serialized, remark) if self.codec else '',
+            stored_cookie=serialized,
+            stored_remark=remark,
         )
+
+    @staticmethod
+    def _fingerprint(cookie: str, remark: str | None) -> str:
+        # 识别复用同一数据库行的凭证更新，不输出凭证正文。
+        return hashlib.sha256((cookie + '\0' + (remark or '')).encode('utf-8')).hexdigest()
+
+    def save_snapshot(self, record: CredentialRecord, auth: Any) -> CredentialRecord | None:
+        """仅更新仍匹配旧快照的状态，避免覆盖并发重新登录。"""
+        if self.codec is None:
+            raise ValueError('当前凭证类型不支持状态快照')
+        cookie = self.codec.cookie(auth)
+        remark = self.codec.encode(auth, record.stored_remark)
+        dialect = self.engine.dialect.name
+        binary = dialect in {'mysql', 'mariadb'}
+        def exact(column, value):
+            return self._case_sensitive(column, dialect) == (value.encode('utf-8') if binary and value is not None else value)
+        try:
+            with self.engine.begin() as connection:
+                result = connection.execute(self.table.update().where(
+                    self.table.c.id == record.row_id,
+                    self.table.c.project_id == self.project_id,
+                    exact(self.table.c.type, self.credential_type),
+                    exact(self.table.c.account_id, record.account_id),
+                    exact(self.table.c.cookie, record.stored_cookie),
+                    exact(self.table.c.remark, record.stored_remark),
+                ).values(cookie=cookie, remark=remark, create_time=func.current_timestamp()))
+                created = connection.execute(select(self.table.c.create_time).where(self.table.c.id == record.row_id)).scalar_one_or_none()
+        except SQLAlchemyError as error:
+            raise CredentialStoreError('保存账号状态快照失败') from error
+        if result.rowcount != 1:
+            return None
+        return CredentialRecord(record.row_id, record.account_id, created, auth,
+                                revision=self.codec.revision(remark),
+                                fingerprint=self._fingerprint(cookie, remark),
+                                stored_cookie=cookie, stored_remark=remark)
 
     def delete_credential(self, record: CredentialRecord) -> bool:
         """精确删除仍与认证快照一致的数据库凭证。"""
         validate_account_id(record.account_id)
         if isinstance(record.row_id, bool) or record.row_id <= 0:
             raise ValueError('credential_id 必须是正整数')
-        serialized = serialize_credential(record.auth)
+        serialized = record.stored_cookie if self.codec else serialize_credential(record.auth)
         try:
             with self.engine.begin() as connection:
                 dialect_name = connection.dialect.name

@@ -21,6 +21,7 @@ from builder.proto import ProtoBuilder
 from utils.fingerprint import get_profile
 from utils.dy_util import splice_url, generate_a_bogus, generate_msToken, trans_cookies
 from utils.http_util import get_douyin_http_timeout, get_douyin_tls_verify
+from utils.user_read.client import get_user_read_client
 
 
 class DouyinAuthenticationError(RuntimeError):
@@ -228,7 +229,9 @@ class DouyinAPI:
         for _ in range(page_num):
             res_json = DouyinAPI.get_user_work_info(auth, user_url, max_cursor)
             works = res_json.get("aweme_list")
-            if not isinstance(works, list) or not works:
+            if res_json.get('status_code') not in (None, 0, '0') or not isinstance(works, list):
+                raise ValueError('上游响应缺少有效 aweme_list')
+            if not works:
                 break
 
             work_list.extend(works)
@@ -253,63 +256,10 @@ class DouyinAPI:
         :param max_cursor:  上一次请求的max_cursor.
         :return:
         """
-        api = f"/aweme/v1/web/aweme/post/"
-        user_id = user_url.split("/")[-1].split("?")[0]
-        headers = HeaderBuilder().build(HeaderType.GET)
-        headers.set_referer(user_url)
-        ms_token = auth.msToken
+        client = get_user_read_client(auth)
         for attempt in range(DouyinAPI.user_work_max_attempts):
-            params = Params()
-            params.add_param("device_platform", 'webapp')
-            params.add_param("aid", '6383')
-            params.add_param("channel", 'channel_pc_web')
-            params.add_param("sec_user_id", user_id)
-            params.add_param("max_cursor", max_cursor)
-            params.add_param("locate_query", 'false')
-            params.add_param("show_live_replay_strategy", '1')
-            params.add_param("need_time_list", '1' if max_cursor == '0' else '0')
-            params.add_param("time_list_query", '0')
-            params.add_param("whale_cut_token", '')
-            params.add_param("cut_version", '1')
-            params.add_param("count", '18')
-            params.add_param("publish_video_strategy_type", '2')
-            params.add_param("update_version_code", '170400')
-            params.add_param("pc_client_type", '1')
-            params.add_param("version_code", '290100')
-            params.add_param("version_name", '29.1.0')
-            params.add_param("cookie_enabled", 'true')
-            params.add_param("screen_width", get_profile()["screen_width"])
-            params.add_param("screen_height", get_profile()["screen_height"])
-            params.add_param("browser_language", 'zh-CN')
-            params.add_param("browser_platform", 'Win32')
-            params.add_param("browser_name", get_profile()["browser_name"])
-            params.add_param("browser_version", get_profile()["browser_version"])
-            params.add_param("browser_online", 'true')
-            params.add_param("engine_name", 'Blink')
-            params.add_param("engine_version", get_profile()["engine_version"])
-            params.add_param("os_name", 'Windows')
-            params.add_param("os_version", '10')
-            params.add_param("cpu_core_num", get_profile()["cpu_core_num"])
-            params.add_param("device_memory", get_profile()["device_memory"])
-            params.add_param("platform", 'PC')
-            params.add_param("downlink", '10')
-            params.add_param("effective_type", '4g')
-            params.add_param("round_trip_time", '100')
-            params.with_web_id(auth, user_url)
-            params.add_param("verifyFp", auth.cookie['s_v_web_id'])
-            params.add_param("fp", auth.cookie['s_v_web_id'])
-            params.add_param("msToken", ms_token)
-            # 每次重试重新生成签名，避免偶发无效签名直接冷却账号。
-            params.with_a_bogus()
-            resp = DouyinAPI._request(
-                'GET',
-                f'{DouyinAPI.douyin_url}{api}',
-                headers=headers.get(),
-                cookies=auth.cookie,
-                params=params.get(),
-                verify=get_douyin_tls_verify(),
-                timeout=get_douyin_http_timeout(),
-            )
+            # 使用相同账号会话生成双签名，直接发送已规范化的 URL。
+            resp = client.get_user_work_info(user_url, max_cursor)
             try:
                 return parse_douyin_response(resp)
             except DouyinAuthenticationError:
@@ -327,9 +277,12 @@ class DouyinAPI:
                     # 连续两次 403 后只刷新一次 token，首次失败仅重新签名。
                     refresher = getattr(auth, 'refresh_mstoken', None)
                     try:
-                        ms_token = refresher() if callable(refresher) else generate_msToken()
+                        if callable(refresher):
+                            refresher()
+                        else:
+                            auth.msToken = generate_msToken()
                     except Exception:
-                        ms_token = generate_msToken()
+                        auth.msToken = generate_msToken()
                     token_refreshed = True
                 logger.warning(
                     '用户作品请求被拒绝，重新签名后重试 attempt={} status={} token_refreshed={}',
@@ -630,55 +583,10 @@ class DouyinAPI:
         :param user_url: 用户主页URL.
         :return: 用户信息.
         """
-        api = f"/aweme/v1/web/user/profile/other/"
-        user_id = user_url.split("/")[-1].split("?")[0]
-        headers = HeaderBuilder().build(HeaderType.GET)
-        headers.set_referer(user_url)
-        params = Params()
-        params.add_param("device_platform", 'webapp')
-        params.add_param("aid", '6383')
-        params.add_param("channel", 'channel_pc_web')
-        params.add_param("publish_video_strategy_type", '2')
-        params.add_param("source", 'channel_pc_web')
-        params.add_param("sec_user_id", user_id)
-        params.add_param("personal_center_strategy", '1')
-        params.add_param("update_version_code", '170400')
-        params.add_param("pc_client_type", '1')
-        params.add_param("version_code", '170400')
-        params.add_param("version_name", '17.4.0')
-        params.add_param("cookie_enabled", 'true')
-        params.add_param("screen_width", get_profile()["screen_width"])
-        params.add_param("screen_height", get_profile()["screen_height"])
-        params.add_param("browser_language", 'zh-CN')
-        params.add_param("browser_platform", 'Win32')
-        params.add_param("browser_name", get_profile()["browser_name"])
-        params.add_param("browser_version", get_profile()["browser_version"])
-        params.add_param("browser_online", 'true')
-        params.add_param("engine_name", 'Blink')
-        params.add_param("engine_version", get_profile()["engine_version"])
-        params.add_param("os_name", 'Windows')
-        params.add_param("os_version", '10')
-        params.add_param("cpu_core_num", get_profile()["cpu_core_num"])
-        params.add_param("device_memory", get_profile()["device_memory"])
-        params.add_param("platform", 'PC')
-        params.add_param("downlink", '10')
-        params.add_param("effective_type", '4g')
-        params.add_param("round_trip_time", '100')
-        params.with_web_id(auth, user_url)
-        params.add_param("msToken", auth.msToken)
-        params.add_param('verifyFp', auth.cookie['s_v_web_id'])
-        params.add_param('fp', auth.cookie['s_v_web_id'])
-        params.with_a_bogus()
-        resp = DouyinAPI._request(
-            'GET',
-            f'{DouyinAPI.douyin_url}{api}',
-            headers=headers.get(),
-            cookies=auth.cookie,
-            params=params.get(),
-            verify=get_douyin_tls_verify(),
-            timeout=get_douyin_http_timeout(),
-        )
-        return parse_douyin_response(resp)
+        # 用户资料和作品共享浏览器会话及设备号。
+        response = get_user_read_client(auth).get_user_info(user_url)
+        return parse_douyin_response(response)
+
 
     @staticmethod
     def search_general_work(auth, query: str, sort_type: str = '0', publish_time: str = '0', offset: str = '0',

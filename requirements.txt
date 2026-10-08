@@ -1,6 +1,7 @@
 aiofiles
 aiohttp
 beautifulsoup4
+curl_cffi>=0.13.0
 ecdsa
 fastapi
 httpx

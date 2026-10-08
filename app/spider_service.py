@@ -503,6 +503,11 @@ class SpiderService:
                     # 用户作品接口直接使用主页路径中的 sec_user_id。
                     resolved_user_url = f'https://www.douyin.com/user/{user_id}'
 
+                # 与成功脚本一致，先取主页资料，再抓作品并补全作者信息。
+                user_info = self.douyin_api.get_user_info(auth, resolved_user_url)
+                author = user_info.get('user') if isinstance(user_info, dict) else None
+                if not isinstance(author, dict):
+                    raise ValueError(self._upstream_error_message(user_info, '上游响应缺少 user'))
                 works = self.douyin_api.get_user_some_work_info(auth, resolved_user_url, page_num)
                 if not isinstance(works, list):
                     raise ValueError('上游作品列表格式错误')
@@ -513,6 +518,7 @@ class SpiderService:
                         continue
                     # 复制原始数据，避免修改上游返回对象
                     merged_work = deepcopy(work)
+                    merged_work.setdefault('author', {}).update(author)
                     item = handle_work_info(merged_work)
                     items.append(item)
                     logger.info('[{}] 抓取用户作品成功 url={}', request_id, item['work_url'])

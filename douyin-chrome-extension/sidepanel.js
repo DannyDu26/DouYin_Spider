@@ -331,6 +331,7 @@ async function fetchUserWorksDirect(request) {
     userAgent: state.profile?.userAgent || "",
     secChUa: state.profile?.secChUa || "",
     secChUaPlatform: state.profile?.secChUaPlatform || "Windows",
+    acceptLanguage: state.profile?.language || "zh-CN",
   });
   if (!response?.ok || !response.response) {
     throw new Error(response?.error || "用户作品请求失败");

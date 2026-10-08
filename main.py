@@ -563,16 +563,15 @@ def create_app(
         '/api/v1/douyin/user_videos',
         tags=['videos'],
         summary='获取用户作品',
-        description='根据抖音用户主页链接或主页路径中的 `user_id`，获取指定页数的标准化作品数据。',
+        description='`user_id` 自动识别用户 ID 或完整 HTTPS 抖音主页链接，也兼容旧参数 `user_url`；获取指定页数的标准化作品数据。',
         response_description='用户信息、作品列表和实际使用的账号信息。',
         responses=SCRAPE_ERROR_RESPONSES,
     )
     def get_user_works(payload: UserWorksRequest, request: Request):
         data = request.app.state.spider_service.get_user_works(
-            payload.user_url,
+            payload.resolved_user_url,
             payload.page_num,
             request.state.request_id,
-            user_id=payload.user_id,
         )
         return _response(request, data)
 

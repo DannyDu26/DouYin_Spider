@@ -281,6 +281,25 @@
     defineGlobal("XMLHttpRequest", XMLHttpRequestObject);
     defineGlobal("Image", ImageObject);
 
+    // 旧版 Node.js 的高精度计时器需要从内置模块获取。
+    if (typeof root.performance === "undefined" && typeof require === "function")
+        defineGlobal("performance", require("perf_hooks").performance);
+
+    // 兼容缺少 atob 的旧版 Node.js，按单字节字符串解码。
+    if (typeof root.atob === "undefined" && typeof Buffer !== "undefined") {
+        defineGlobal("atob", function(value) {
+            var encoded = String(value).replace(/[\t\n\f\r ]/g, "");
+            if (encoded.length % 4 === 0)
+                encoded = encoded.replace(/={1,2}$/, "");
+            if (encoded.length % 4 === 1 || /[^A-Za-z0-9+/]/.test(encoded)) {
+                var error = new Error("Invalid base64 string");
+                error.name = "InvalidCharacterError";
+                throw error;
+            }
+            return Buffer.from(encoded, "base64").toString("latin1");
+        });
+    }
+
     // 同步常见的 window 属性，保持浏览器式全局引用。
     defineWindowProperty(windowObject, "window", windowObject);
     defineWindowProperty(windowObject, "self", windowObject);
@@ -295,6 +314,8 @@
     defineWindowProperty(windowObject, "sessionStorage", sessionStorageObject);
     defineWindowProperty(windowObject, "XMLHttpRequest", XMLHttpRequestObject);
     defineWindowProperty(windowObject, "Image", ImageObject);
+    defineWindowProperty(windowObject, "atob", root.atob);
+    defineWindowProperty(windowObject, "performance", root.performance);
     windowObject.innerWidth = windowObject.innerWidth || 1917;
     windowObject.innerHeight = windowObject.innerHeight || 947;
     windowObject.outerWidth = windowObject.outerWidth || 1920;

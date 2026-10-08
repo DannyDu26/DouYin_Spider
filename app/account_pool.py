@@ -106,6 +106,7 @@ class AccountPool:
         cooldown_failure_limit: int = 3,
         credential_remover: Callable[[CredentialRecord], bool] | None = None,
         clock=None,
+        manage_auth_resources: bool = False,
     ):
         if max_concurrent_per_account <= 0:
             raise ValueError('max_concurrent_per_account 必须是正整数')
@@ -123,6 +124,9 @@ class AccountPool:
         # 记录已移除的凭证版本，避免定时刷新重新加入同一失效凭证。
         self._removed_credentials: dict[str, int] = {}
         self._cursor = 0
+        self._manage_auth_resources = manage_auth_resources
+        self._active_auths: dict[int, int] = {}
+        self._retired_auths: dict[int, Any] = {}
         for record in records:
             self._upsert_record(record)
 
@@ -164,6 +168,7 @@ class AccountPool:
             )
             return
         # 保留正在使用的信号量，使旧租约结束后再放行新认证。
+        self._retire_auth(state.record.auth, record.auth)
         state.record = record
         state.cooldown_until = None
         state.failure_count = 0
@@ -222,9 +227,18 @@ class AccountPool:
                     continue
 
                 # 定时查询可能早于并发扫码 INSERT，禁止旧记录回写内存池。
-                if record.row_id <= state.record.row_id:
+                previous = state.record
+                newer = record.row_id > previous.row_id or (
+                    record.row_id == previous.row_id and bool(record.fingerprint)
+                    and (record.revision > previous.revision or (
+                        record.revision == previous.revision and record.fingerprint != previous.fingerprint
+                    ))
+                )
+                if not newer:
+                    self._retire_auth(record.auth, previous.auth)
                     continue
                 # 保留信号量，使已租出的旧认证可以安全完成当前请求。
+                self._retire_auth(previous.auth, record.auth)
                 state.record = record
                 state.cooldown_until = None
                 state.failure_count = 0
@@ -294,6 +308,9 @@ class AccountPool:
                             if account_id is None:
                                 self._cursor = (index + 1) % len(account_ids)
                             record = state.record
+                            if self._manage_auth_resources:
+                                key = id(record.auth)
+                                self._active_auths[key] = self._active_auths.get(key, 0) + 1
                             return AccountLease(
                                 account_id=selected_account_id,
                                 auth=record.auth,
@@ -330,9 +347,33 @@ class AccountPool:
         try:
             yield lease
         finally:
-            state.semaphore.release()
             with self._condition:
+                if self._manage_auth_resources:
+                    key = id(lease.auth)
+                    self._active_auths[key] -= 1
+                    if not self._active_auths[key]:
+                        del self._active_auths[key]
+                        retired = self._retired_auths.pop(key, None)
+                        if retired is not None:
+                            retired.close()
+                state.semaphore.release()
                 self._condition.notify_all()
+
+    def _retire_auth(self, auth, replacement=None) -> None:
+        """等待旧租约结束再释放客户端；抖音保持原有行为。"""
+        if not self._manage_auth_resources or auth is None or auth is replacement:
+            return
+        if self._active_auths.get(id(auth), 0):
+            self._retired_auths[id(auth)] = auth
+        else:
+            auth.close()
+
+    def close(self) -> None:
+        """关闭托管的认证连接，活跃租约延迟释放。"""
+        with self._condition:
+            for state in self._accounts.values():
+                self._retire_auth(state.record.auth)
+            self._accounts.clear()
 
     def mark_auth_failure(
         self,
