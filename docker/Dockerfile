@@ -1,14 +1,14 @@
+FROM node:24-bookworm-slim AS xhs-node
 FROM python:3.10-slim
 
 WORKDIR /app
 
 # 使用国内 Debian 镜像源，加速系统依赖安装
-# 安装 BDMS 所需的 Node.js 运行时
+# 系统依赖与浏览器虚拟显示环境
 RUN sed -i 's@deb.debian.org@mirrors.tuna.tsinghua.edu.cn@g' \
     /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-    nodejs \
     curl \
     gnupg \
     build-essential \
@@ -19,6 +19,12 @@ RUN sed -i 's@deb.debian.org@mirrors.tuna.tsinghua.edu.cn@g' \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python --version
+
+# 使用已验证的 Node 24 系列，避免发行版旧版本缺少 zlib.crc32。
+COPY --from=xhs-node /usr/local/bin/node /usr/local/bin/node
+COPY --from=xhs-node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
 COPY requirements.txt .
 
@@ -31,6 +37,10 @@ RUN python -m playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .
+
+# 安装小红书指纹计算依赖，并检查 RAP 压缩所需运行时能力。
+RUN npm ci --omit=dev --ignore-scripts \
+    && node -e "require('crypto-js'); if(typeof require('zlib').crc32 !== 'function') process.exit(1)"
 
 # 创建生产环境日志目录，运行时可挂载到宿主机持久化
 RUN mkdir -p /data/logs/douyin-spider \

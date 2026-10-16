@@ -375,6 +375,17 @@ class AccountPool:
                 self._retire_auth(state.record.auth)
             self._accounts.clear()
 
+    def update_snapshot(self, record: CredentialRecord) -> bool:
+        """更新同一运行对象的落库版本，不重置冷却和并发槽位。"""
+        with self._condition:
+            state = self._accounts.get(record.account_id)
+            if state is None or state.record.auth is not record.auth:
+                return False
+            if record.revision <= state.record.revision:
+                return False
+            state.record = record
+            return True
+
     def mark_auth_failure(
         self,
         account_id: str,

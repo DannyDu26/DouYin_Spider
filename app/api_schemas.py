@@ -55,7 +55,7 @@ class WorksRequest(BaseModel):
         default=None,
         min_length=1,
         max_length=20,
-        description='抖音作品链接列表；每次可提交 1～20 个 HTTPS 链接。',
+        description='抖音作品链接列表；每次可提交 1～20 个 HTTPS 链接，每个不超过 2048 字符。链接须含数字 /video/{id} 或 modal_id，不支持直接提交短链；与 video_id 必须且只能提供一个。',
         examples=[['https://www.douyin.com/video/7517981045911538959']],
     )
     video_id: str | None = Field(
@@ -63,7 +63,7 @@ class WorksRequest(BaseModel):
         min_length=1,
         max_length=32,
         pattern=r'^\d+$',
-        description='单个抖音作品 ID；与 urls 二选一。',
+        description='单个抖音作品 ID，1～32 位数字字符串，从作品链接的 /video/{id} 或 modal_id 取得；与 urls 必须且只能提供一个。',
         examples=['7517981045911538959'],
     )
 
@@ -102,7 +102,7 @@ class WorkCommentsRequest(BaseModel):
 
     url: str | None = Field(
         default=None,
-        description='需要查询评论的抖音作品链接。',
+        description='需要查询评论的完整 HTTPS 抖音作品链接，不超过 2048 字符，须含数字 /video/{id} 或 modal_id；与 video_id 必须且只能提供一个，不支持直接提交短链。',
         examples=['https://www.douyin.com/video/7517981045911538959'],
     )
     video_id: str | None = Field(
@@ -110,7 +110,7 @@ class WorkCommentsRequest(BaseModel):
         min_length=1,
         max_length=32,
         pattern=r'^\d+$',
-        description='抖音作品 ID；与 url 二选一。',
+        description='抖音作品 ID，1～32 位数字字符串，从作品链接取得；与 url 必须且只能提供一个。',
         examples=['7517981045911538959'],
     )
     cursor: int = Field(
@@ -118,7 +118,7 @@ class WorkCommentsRequest(BaseModel):
         ge=0,
         le=9_223_372_036_854_775_807,
         strict=True,
-        description='分页游标；首次请求传 0，后续使用响应中的 next_cursor。',
+        description='分页游标，非负 JSON 整数；默认 0 用于首次请求，后续原样使用 data.next_cursor，data.has_more=false 时停止。不是页码。',
         examples=[0],
     )
     count: int = Field(
@@ -126,7 +126,7 @@ class WorkCommentsRequest(BaseModel):
         ge=1,
         le=50,
         strict=True,
-        description='本次请求的评论数量，范围为 1～50。',
+        description='本次期望获取的一级评论数量，JSON 整数 1～50，默认 20；实际返回可能更少，不自动获取二级回复。',
         examples=[20],
     )
 
@@ -167,14 +167,14 @@ class VideoSubCommentsRequest(BaseModel):
         min_length=1,
         max_length=32,
         pattern=r'^\d+$',
-        description='一级评论所属的抖音作品 ID。',
+        description='一级评论所属的抖音作品 ID，1～32 位数字字符串；必须与 comment_id 所属作品一致。',
         examples=['7517981045911538959'],
     )
     comment_id: str = Field(
         min_length=1,
         max_length=32,
         pattern=r'^\d+$',
-        description='需要查询回复的一级评论 ID。',
+        description='需要查询回复的一级评论 ID，1～32 位数字字符串；从一级评论响应 data.items 中的 cid 取得。',
         examples=['7518291639789450018'],
     )
     cursor: int = Field(
@@ -182,7 +182,7 @@ class VideoSubCommentsRequest(BaseModel):
         ge=0,
         le=9_223_372_036_854_775_807,
         strict=True,
-        description='分页游标；首次请求传 0，后续使用响应中的 next_cursor。',
+        description='二级评论分页游标，非负 JSON 整数；默认 0 用于首次请求，后续原样使用 data.next_cursor，data.has_more=false 时停止。不是页码。',
         examples=[0],
     )
     count: int = Field(
@@ -190,7 +190,7 @@ class VideoSubCommentsRequest(BaseModel):
         ge=1,
         le=50,
         strict=True,
-        description='本次请求的二级评论数量，范围为 1～50。',
+        description='本次期望获取的二级评论数量，JSON 整数 1～50，默认 20；实际返回可能更少。',
         examples=[20],
     )
 
@@ -208,21 +208,21 @@ class UserWorksRequest(BaseModel):
 
     user_url: str | None = Field(
         default=None,
-        description='抖音用户主页链接，路径格式必须为 /user/{id}。',
+        description='兼容旧调用的完整 HTTPS 抖音主页链接，不超过 2048 字符，路径必须为 /user/{sec_user_id}；与 user_id 必须且只能提供一个，建议新调用使用 user_id。',
         examples=['https://www.douyin.com/user/MS4wLjABAAAA-example'],
     )
     user_id: str | None = Field(
         default=None,
         min_length=1,
         max_length=MAX_URL_LENGTH,
-        description='自动识别用户 ID（sec_user_id）或完整 HTTPS 抖音主页链接；与旧参数 user_url 二选一。',
+        description='自动识别用户 ID（sec_user_id）或完整 HTTPS 抖音主页链接；与旧参数 user_url 必须且只能提供一个。ID 为主页 /user/ 后的标识，1～128 位字母、数字、点、下划线、波浪号或连字符；不是用户展示的抖音号。链接不超过 2048 字符。',
         examples=['MS4wLjABAAAA-example', 'https://www.douyin.com/user/MS4wLjABAAAA-example'],
     )
     page_num: int = Field(
         default=1,
         ge=1,
         le=10,
-        description='需要抓取的页数，范围为 1～10。',
+        description='从用户作品首页开始连续抓取的页数，范围 1～10，默认 1；这是抓取页数而非起始页码，作品不足或上游结束时提前停止。',
         examples=[1],
     )
 
@@ -281,42 +281,48 @@ class SearchWorksRequest(BaseModel):
     query: str = Field(
         min_length=1,
         max_length=100,
-        description='搜索关键词；首尾空白会被自动移除。',
+        description='搜索关键词，输入长度 1～100 字符；首尾空白会被自动移除，不能全为空白或含换行等控制字符。',
         examples=['榴莲'],
     )
     limit: int = Field(
         default=25,
         ge=1,
         le=100,
-        description='最多返回的作品数量，范围为 1～100，默认与上游单页数量一致为 25。',
+        description='最多返回的作品数量，范围 1～100，默认 25；服务按需抓取多页至达到上限或上游结束，不是页码，实际结果可能少于该值。',
         examples=[25],
     )
     sort_type: Literal['0', '1', '2'] = Field(
         default='0',
         description='排序方式：0 综合排序；1 最多点赞；2 最新发布。',
+        examples=['0'],
     )
     publish_time: Literal['0', '1', '7', '180'] = Field(
         default='0',
         description='发布时间：0 不限；1 一天内；7 一周内；180 半年内。',
+        examples=['0'],
     )
     filter_duration: Literal['', '0-1', '1-5', '5-10000'] = Field(
         default='',
         description='视频时长：空字符串不限；0-1 一分钟内；1-5 一至五分钟；5-10000 五分钟以上。',
+        examples=[''],
     )
     search_range: Literal['0', '1', '2', '3'] = Field(
         default='0',
         description='搜索范围：0 不限；1 最近看过；2 还未看过；3 关注的人。',
+        examples=['0'],
     )
     content_type: Literal['0', '1', '2'] = Field(
         default='0',
         description='内容类型：0 不限；1 视频；2 图文。',
+        examples=['0'],
     )
     target_account_id: str | None = Field(
         default=None,
         min_length=1,
         max_length=64,
         pattern=r'^[a-z0-9][a-z0-9_-]*$',
-        description='仅供测试环境定向账号；需要显式启用测试账号固定开关。',
+        description='仅供测试环境定向到指定账号池标识，1～64 位小写字母、数字、下划线或连字符，首位须为字母或数字。默认省略，由账号池自动调度；需启用 ENABLE_TEST_ACCOUNT_PINNING，未启用返回 403，prod 强制禁用。不是抖音用户 ID。',
+        examples=['marketing-01'],
     )
 
     @field_validator('query')
@@ -341,7 +347,7 @@ class QrSessionRequest(BaseModel):
         min_length=1,
         max_length=64,
         pattern=r'^[a-z0-9][a-z0-9_-]*$',
-        description='账号唯一标识，只允许小写字母、数字、下划线和连字符。',
+        description='账号唯一标识，1～64 位小写字母、数字、下划线或连字符，首位须为字母或数字；由调用方自定义，例如 marketing-01。同一账号重新登录时沿用，用于更新凭证；不是抖音号或 sec_user_id。',
         examples=['marketing-01'],
     )
 
@@ -356,6 +362,6 @@ class QrSmsCodeRequest(BaseModel):
         min_length=4,
         max_length=8,
         pattern=r'^\d{4,8}$',
-        description='手机收到的短信验证码，仅允许 4～8 位数字。',
+        description='手机收到的短信验证码，仅允许 4～8 位数字字符串，保留开头的 0；用于当前扫码会话，状态为 waiting_sms_code 时提交。',
         examples=['123456'],
     )

@@ -33,18 +33,18 @@
     <header>
       <div class="eyebrow">短视频数据助手 / PRIVACY POLICY</div>
       <h1>隐私政策</h1>
-      <p class="meta">生效及最后更新日期：2026 年 9 月 14 日<br>适用产品：短视频数据助手（Chrome 扩展；本政策对应版本 0.1.20）</p>
+      <p class="meta">生效及最后更新日期：2026 年 10 月 16 日<br>适用产品：短视频数据助手（Chrome 扩展；本政策对应版本 0.2.9）</p>
     </header>
 
-    <p>本政策说明“短视频数据助手”（以下简称“本扩展”）如何访问、使用、保存和传输数据。本扩展使用您当前 Chrome 浏览器中的抖音登录状态，按您的操作查询搜索作品、用户作品、评论及回复，并提供本地预览、复制以及 JSON / CSV 导出。</p>
+    <p>本政策说明“短视频数据助手”（以下简称“本扩展”）如何访问、使用、保存和传输数据。本扩展使用您当前 Chrome 浏览器中的抖音或小红书登录状态，按您的操作查询作品、笔记、用户内容、评论及回复，并提供本地预览、复制以及 JSON / CSV 导出。</p>
     <p>本扩展由项目维护者 DannyDu26 维护，项目地址为 <a href="https://github.com/DannyDu26/DouYin_Spider">DannyDu26/DouYin_Spider</a>。本扩展并非抖音或字节跳动的官方产品。本政策适用于该 Chrome 扩展，不涵盖仓库中的其他独立程序。</p>
-    <div class="notice"><strong>数据处理要点：</strong>本扩展会访问登录 Cookie 和当前页面信息，并向抖音及字节跳动的指定接口发送完成查询所需的数据。采集结果保留在扩展界面的内存中；查询参数及备用验证标识保存在您的浏览器本地。当前版本未设置开发者用于接收扩展业务数据的服务器。</div>
+    <div class="notice"><strong>数据处理要点：</strong>本扩展会访问登录 Cookie 和当前页面信息，并向抖音、字节跳动或小红书的指定接口发送完成查询所需的数据。采集结果保留在扩展界面的内存中；查询参数及备用验证标识保存在您的浏览器本地。当前版本未设置开发者用于接收扩展业务数据的服务器。</div>
 
     <section aria-labelledby="data">
       <h2 id="data">1. 访问和处理的数据</h2>
       <ul>
-        <li><strong>登录与会话信息：</strong>读取抖音域名下的 Cookie，包括登录状态标识、<code>ttwid</code>、<code>msToken</code>、<code>s_v_web_id</code> 等实际存在的字段，用于判断登录状态、构造经身份验证的请求及完成接口验证。扩展不要求您输入账号密码，但读取的会话 Cookie 属于敏感认证信息。</li>
-        <li><strong>当前标签页和页面内容：</strong>读取当前操作标签页的 URL，在抖音页面中识别搜索关键词、用户主页标识及作品 ID；读取必要的页面内容、页面 Cookie 和本地存储以提取 <code>webid</code>、验证标识及登录状态。用户作品接口无法返回结果时，可读取并滚动当前目标用户主页中的作品列表。</li>
+        <li><strong>登录与会话信息：</strong>读取抖音或小红书域名下的 Cookie，包括实际存在的登录状态和验证字段（小红书可能包括 <code>a1</code>、<code>web_session</code> 等），用于判断登录状态、构造经身份验证的请求及完成接口验证。扩展不要求您输入账号密码，但读取的会话 Cookie 属于敏感认证信息。</li>
+        <li><strong>当前标签页和页面内容：</strong>读取当前操作标签页的 URL，在抖音或小红书页面中识别搜索关键词、用户主页标识、作品或笔记 ID；小红书请求在当前标签页中发起，使用浏览器自动携带 Cookie。</li>
         <li><strong>浏览器与设备环境：</strong>读取浏览器 User-Agent、版本、语言、平台或操作系统信息、CPU 并发数、设备内存、屏幕及窗口尺寸等，用于请求参数、签名和平台验证。缺少相关标识时，会生成备用验证标识或临时数字标识。</li>
         <li><strong>您输入的查询条件：</strong>包括关键词、用户链接或 ID、作品链接或 ID、数量、排序、筛选条件及是否包含回复等，用于执行任务和恢复表单。</li>
         <li><strong>查询结果：</strong>包括平台返回的作品描述、作品与用户标识、昵称、发布时间、点赞/评论/转发/收藏数量、评论正文及回复关系。原始 JSON 可能包含平台返回的其他个人信息字段，例如头像链接、个人资料或地区信息（以实际返回内容为准）；公开可见的数据仍可能属于个人信息。</li>
@@ -57,6 +57,7 @@
       <p>上述数据仅用于本扩展的登录检测、查询请求、请求验证、页面识别、本地预览、导出和设置恢复。打开侧边栏或切换相关页面时可能触发上下文及登录检测；作品和评论查询由您启动。</p>
       <ul>
         <li><strong>抖音接口：</strong>查询请求发送至 <code>https://douyin.com/*</code> 及 <code>https://*.douyin.com/*</code> 范围内的相关服务。请求可能携带查询条件、用户/作品标识、会话 Cookie、浏览器信息及验证参数。</li>
+        <li><strong>小红书接口：</strong>查询请求发送至 <code>https://*.xiaohongshu.com/*</code> 范围内的相关服务。请求可能携带查询条件、用户/笔记标识、会话 Cookie 及本地生成的验证参数。</li>
         <li><strong>字节跳动验证接口：</strong>查询用户作品时，扩展向 <code>https://mssdk.bytedance.com/web/common</code> 发送验证请求，包括 <code>ttwid</code>（如存在）、User-Agent、时间戳以及包含硬件和窗口信息的编码验证数据，以获取动态 <code>msToken</code>。编码处理不代表这些信息不会被接收方处理。</li>
         <li><strong>您选择的本地输出：</strong>点击导出会将结果保存到您设备上的文件；点击复制会将 JSON 写入系统剪贴板。此后文件、剪贴板及其可能的系统同步由您和相关软件管理。</li>
       </ul>
@@ -80,20 +81,20 @@
       <h2 id="permissions">4. Chrome 权限用途</h2>
       <ul>
         <li><code>activeTab</code>：识别用户当前操作的标签页。</li>
-        <li><code>cookies</code>：读取抖音登录会话及验证所需的 Cookie。</li>
+        <li><code>cookies</code>：读取抖音或小红书登录会话及验证所需的 Cookie。</li>
         <li><code>declarativeNetRequestWithHostAccess</code>：为用户作品及令牌请求临时调整 Cookie、Referer、User-Agent 等请求头。</li>
-        <li><code>scripting</code>：在抖音页面读取必要上下文、发起查询或读取作品列表。</li>
+        <li><code>scripting</code>：在抖音或小红书页面读取必要上下文并发起查询。</li>
         <li><code>sidePanel</code>：提供扩展操作界面。</li>
         <li><code>storage</code>：保存查询表单、模式及备用验证标识。</li>
         <li><code>webNavigation</code>：响应抖音单页应用内部 URL 切换，更新操作上下文。</li>
-        <li><strong>网站访问权限：</strong><code>https://douyin.com/*</code>、<code>https://*.douyin.com/*</code> 和 <code>https://mssdk.bytedance.com/*</code>，用于上述页面操作、平台查询及令牌验证。</li>
+        <li><strong>网站访问权限：</strong><code>https://douyin.com/*</code>、<code>https://*.douyin.com/*</code>、<code>https://xiaohongshu.com/*</code>、<code>https://*.xiaohongshu.com/*</code> 和 <code>https://mssdk.bytedance.com/*</code>，用于上述页面操作、平台查询及令牌验证。</li>
       </ul>
     </section>
 
     <section aria-labelledby="choices">
       <h2 id="choices">5. 您的选择及删除方式</h2>
       <p>您可以停止查询、关闭侧边栏，或在 Chrome 的扩展管理页面限制网站访问权限、停用或卸载本扩展。停用或收回必要权限后，相关功能将无法继续正常工作。</p>
-      <p>卸载扩展可清除其本地设置和备用验证标识；重新加载扩展可清除当前运行内存中的结果。导出的 JSON / CSV 文件及剪贴板内容需要您另行删除。卸载扩展不会清除抖音网站 Cookie，也不会删除已经发送给平台的数据；您可通过 Chrome 网站数据设置清除平台 Cookie，并向相应平台提出相关数据请求。</p>
+      <p>卸载扩展可清除其本地设置和备用验证标识；重新加载扩展可清除当前运行内存中的结果。导出的 JSON / CSV 文件及剪贴板内容需要您另行删除。卸载扩展不会清除抖音或小红书网站 Cookie，也不会删除已经发送给平台的数据；您可通过 Chrome 网站数据设置清除平台 Cookie，并向相应平台提出相关数据请求。</p>
       <p>维护者没有通过本扩展集中保存您的业务数据，因此无法远程检索或删除您的本地导出文件。涉及平台账号或平台保存的数据，请同时联系对应平台。</p>
     </section>
 

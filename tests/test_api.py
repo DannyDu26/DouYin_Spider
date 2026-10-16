@@ -151,6 +151,7 @@ def test_health(client):
                 'max_concurrent_requests': 2,
                 'max_concurrent_requests_per_account': 2,
                 'test_account_pinning_enabled': False,
+                'xhs': {'enabled': False, 'accounts': None},
         },
     }
 
@@ -163,8 +164,22 @@ def test_openapi_contains_chinese_endpoint_documentation(client):
     works_request = schema['components']['schemas']['WorksRequest']
     sub_comments_request = schema['components']['schemas']['VideoSubCommentsRequest']
 
-    assert schema['info']['description'].startswith('公司内部使用的抖音多账号数据抓取 API')
-    assert {tag['name'] for tag in schema['tags']} == {'system', 'auth', 'videos'}
+    assert schema['info']['description'].startswith('公司内部使用的抖音、小红书多账号数据抓取 API')
+    assert [tag['name'] for tag in schema['tags']] == [
+        '小红书 · 登录与账号', '小红书 · 数据查询', '抖音 · 登录与账号',
+        '抖音 · 数据查询', '系统 · 健康检查',
+    ]
+    # 每个接口只归属一个目录，避免 Swagger 重复展示。
+    for path in schema['paths'].values():
+        for operation in path.values():
+            assert len(operation['tags']) == 1
+    assert schema['paths']['/api/v1/xhs/auth/sms/send']['post']['tags'] == ['小红书 · 登录与账号']
+    assert not any(path.startswith('/api/v1/xhs/auth/sms-sessions') for path in schema['paths'])
+    send = schema['paths']['/api/v1/xhs/auth/sms/send']['post']
+    login = schema['paths']['/api/v1/xhs/auth/sms/login']['post']
+    assert send['responses']['200']['content']['application/json']['example']['data']['status'] == 'waiting_sms_code'
+    assert login['responses']['200']['content']['application/json']['example']['data']['status'] == 'succeeded'
+    assert schema['components']['schemas']['SearchNotesRequest']['examples'] == [{'keyword': '猫', 'page': 1}]
     assert video_info['summary'] == '批量获取作品详情'
     assert '429' in video_info['responses']
     assert video_info['responses']['502']['description'].startswith('抖音上游')
@@ -175,10 +190,38 @@ def test_openapi_contains_chinese_endpoint_documentation(client):
     assert sub_comments_request['properties']['comment_id']['description'].startswith('需要查询回复')
     assert sub_comments_request['examples'][0]['comment_id'].isdigit()
 
+    # 检查实际发布的 OpenAPI，确保两平台每个请求字段都能直接查到定义和示例。
+    for path in schema['paths'].values():
+        for operation in path.values():
+            description = operation['description']
+            if 'requestBody' in operation:
+                reference = operation['requestBody']['content']['application/json']['schema']['$ref']
+                model = schema['components']['schemas'][reference.rsplit('/', 1)[-1]]
+                assert '**请求体参数（JSON）**' in description
+                for name, field in model['properties'].items():
+                    assert field['description']
+                    assert field['examples']
+                    assert f'| `{name}` |' in description
+                    assert field['description'] in description
+            for parameter in operation.get('parameters', []):
+                assert f'| `{parameter["name"]}` |' in description
+                assert parameter['description'] in description
+
+    # 字符串枚举和整数筛选须显示实际类型及默认值，避免调用时混淆。
+    xhs_search = schema['paths']['/api/v1/xhs/search_notes']['post']['description']
+    dy_search = schema['paths']['/api/v1/douyin/search_videos']['post']['description']
+    assert '| `note_type` | integer | 否，见用法 | 0 |' in xhs_search
+    assert '| `sort_type` | string | 否，见用法 | "0" |' in dy_search
+    assert '无需传入请求体、路径或查询参数' in schema['paths']['/api/health']['get']['description']
+
 
 def test_documentation_and_health_use_api_prefix(client):
     """文档、Schema 和健康检查统一使用 /api 前缀。"""
-    assert client.get('/api/docs').status_code == 200
+    docs = client.get('/api/docs')
+    assert docs.status_code == 200
+    assert '"docExpansion": "none"' in docs.text
+    assert '"filter": true' in docs.text
+    assert '"defaultModelsExpandDepth": -1' in docs.text
     assert client.get('/api/redoc').status_code == 200
     assert client.get('/api/openapi.json').status_code == 200
     assert client.get('/api/health').status_code == 200

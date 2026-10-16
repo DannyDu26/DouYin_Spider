@@ -10,14 +10,16 @@ import {
 } from "./lib/core.js";
 import { DouyinClient, DouyinRequestError } from "./lib/douyin-api.js";
 import { buildMsTokenReportBody } from "./lib/mstoken.js";
+import { XhsBrowserClient, XhsRequestError, inspectXhsLoginCookies, parseXhsPage } from "./lib/xhs-api.js";
 
 const elements = {
   pageSummary: document.querySelector("#page-summary"),
   refreshContext: document.querySelector("#refresh-context"),
+  platformSelect: document.querySelector("#platform-select"),
   sessionBanner: document.querySelector("#session-banner"),
   sessionTitle: document.querySelector("#session-title"),
   sessionDetail: document.querySelector("#session-detail"),
-  openDouyin: document.querySelector("#open-douyin"),
+  openPlatform: document.querySelector("#open-platform"),
   modeTabs: [...document.querySelectorAll(".mode-tab")],
   forms: [...document.querySelectorAll(".crawler-form")],
   runButton: document.querySelector("#run-button"),
@@ -36,12 +38,14 @@ const elements = {
 };
 
 const state = {
+  platform: "douyin",
   mode: "search",
   tab: null,
   pageContext: null,
   login: null,
   profile: null,
   result: null,
+  results: {},
   running: false,
   cancelRequested: false,
   refreshTimer: null,
@@ -55,20 +59,51 @@ function clearResult() {
   elements.rawJson.textContent = "";
 }
 
+function resultKey() {
+  return `${state.platform}:${state.mode}`;
+}
+
+function showCurrentResult() {
+  const result = state.results[resultKey()] || null;
+  state.result = result;
+  if (result) renderResult(result);
+  else clearResult();
+}
+
+function storeCurrentResult(result) {
+  state.results[resultKey()] = result;
+  state.result = result;
+  renderResult(result);
+}
+
 function setMode(mode) {
   const nextMode = mode === "replies" ? "comments" : mode;
   if (nextMode !== state.mode) {
-    // 不在不同功能之间复用上一份抓取结果。
+    // 每个功能 Tab 使用独立结果缓存，切换时只显示当前 Tab 的结果。
     clearResult();
     setTaskStatus("");
   }
   state.mode = nextMode;
   elements.modeTabs.forEach((button) => {
-    button.classList.toggle("is-active", button.dataset.mode === nextMode);
+    const visible = button.dataset.platform === state.platform;
+    button.classList.toggle("is-visible", visible);
+    button.classList.toggle("is-active", visible && button.dataset.mode === nextMode);
   });
   elements.forms.forEach((form) => {
-    form.hidden = form.dataset.form !== nextMode;
+    // 未声明平台的历史表单属于抖音，避免切换到小红书后全部露出。
+    const formPlatform = form.dataset.platform || "douyin";
+    form.hidden = formPlatform !== state.platform || form.dataset.form !== nextMode;
   });
+  showCurrentResult();
+}
+
+function setPlatform(platform) {
+  const next = platform === "xhs" ? "xhs" : "douyin";
+  state.platform = next;
+  elements.platformSelect.value = next;
+  const defaultMode = next === "xhs" ? "search" : "search";
+  setMode(defaultMode);
+  refreshContext();
 }
 
 function setTaskStatus(message, isError = false) {
@@ -78,7 +113,7 @@ function setTaskStatus(message, isError = false) {
 
 function setRunning(running) {
   state.running = running;
-  elements.runButton.disabled = running || !state.login?.ready || !state.tab;
+  elements.runButton.disabled = running || !state.login?.ready || !state.tab || (state.platform === "douyin" && !state.profile);
   elements.runButton.textContent = running ? "抓取中" : "开始抓取";
   elements.stopButton.hidden = !running;
   elements.modeTabs.forEach((button) => {
@@ -87,6 +122,8 @@ function setRunning(running) {
 }
 
 function describePage(context) {
+  if (context.kind === "note") return `笔记页：${context.noteId}`;
+  if (context.kind === "xhs") return "小红书平台页面";
   if (context.kind === "search") return `搜索页：${context.keyword}`;
   if (context.kind === "user") return `用户主页：${context.userId}`;
   if (context.kind === "video") return `作品页：${context.videoId}`;
@@ -96,15 +133,22 @@ function describePage(context) {
 
 function applyPageContext(context) {
   elements.pageSummary.textContent = describePage(context);
-  if (context.kind === "search") {
+  if (state.platform === "douyin" && context.kind === "search") {
     elements.searchKeyword.value = context.keyword;
     setMode("search");
-  } else if (context.kind === "user") {
+  } else if (state.platform === "douyin" && context.kind === "user") {
     elements.userId.value = context.userId;
     setMode("user");
-  } else if (context.kind === "video") {
+  } else if (state.platform === "douyin" && context.kind === "video") {
     elements.commentsVideoId.value = context.videoId;
     setMode("comments");
+  } else if (state.platform === "xhs" && context.kind === "note") {
+    document.querySelector("#xhs-note-form input[name=url]").value = context.url;
+    document.querySelector("#xhs-comments-form input[name=url]").value = context.url;
+    setMode("note");
+  } else if (state.platform === "xhs" && context.kind === "user") {
+    document.querySelector("#xhs-user-form input[name=user]").value = context.userId;
+    setMode("user");
   }
 }
 
@@ -141,14 +185,16 @@ function renderLoginStatus(login, isDouyinTab) {
     elements.sessionBanner.classList.add("is-warning");
     elements.sessionTitle.textContent = "请打开目标平台标签页";
     elements.sessionDetail.textContent = "采集请求需要在已登录的平台页面中执行";
-    elements.openDouyin.hidden = false;
+    elements.openPlatform.hidden = false;
   } else if (!login.ready) {
     elements.sessionBanner.classList.add("is-warning");
     elements.sessionTitle.textContent = "未检测到平台登录状态";
-    elements.sessionDetail.textContent = login.detectedNames.length
-      ? `已读取 ${login.detectedNames.length} 个 Cookie，但未发现登录标识`
+    elements.sessionDetail.textContent = state.platform === "xhs" && login.hasLoginCookie && !login.hasFingerprint
+      ? "已读取登录 Cookie，但未读取到 a1；请刷新小红书页面后重新检测"
+      : login.detectedNames.length
+      ? `已读取 ${login.detectedNames.length} 个 Cookie（${login.detectedNames.slice(0, 12).join("、")}），但未发现登录标识`
       : "Cookie API 未返回平台 Cookie，请登录后重新检测";
-    elements.openDouyin.hidden = false;
+    elements.openPlatform.hidden = false;
   } else {
     elements.sessionTitle.textContent = "已检测到平台登录状态";
     const source = login.hasLoginCookie
@@ -156,7 +202,87 @@ function renderLoginStatus(login, isDouyinTab) {
       : "已通过当前页面账号状态确认";
     const fingerprint = login.hasFingerprint ? "指纹 Cookie：已检测" : "指纹：使用本地回退";
     elements.sessionDetail.textContent = `${source}；${fingerprint}`;
-    elements.openDouyin.hidden = true;
+    elements.openPlatform.hidden = true;
+  }
+}
+
+async function readXhsCookies(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  const storeId = await findCookieStoreId(tabId);
+  const queries = [
+    { url: "https://www.xiaohongshu.com/" },
+    { url: "https://edith.xiaohongshu.com/" },
+    { url: "https://so.xiaohongshu.com/" },
+    { url: "https://creator.xiaohongshu.com/" },
+    { domain: "xiaohongshu.com" },
+    { domain: ".xiaohongshu.com" },
+  ];
+  if (tab.url?.startsWith("https://")) queries.unshift({ url: tab.url });
+  const results = await Promise.allSettled(queries.flatMap((query) => {
+    // 同时读取当前 Cookie Store 和默认 Store，避免分区/浏览器版本差异漏掉 a1。
+    const scopedQuery = storeId ? [{ ...query, storeId }, query] : [query];
+    return scopedQuery.map((item) => chrome.cookies.getAll(item));
+  }));
+  const criticalNames = ["a1", "a_1", "web_session", "web_session_v2", "secure_session", "id_token", "login_token"];
+  const exactQueries = queries.flatMap((query) => criticalNames.map((name) => ({ ...query, name })));
+  const exactResults = await Promise.allSettled(exactQueries.flatMap((query) => {
+    const scopedQuery = storeId ? [{ ...query, storeId }, query] : [query];
+    return scopedQuery.map((item) => chrome.cookies.getAll(item));
+  }));
+  const pageCookies = await readXhsPageCookies(tabId);
+  return mergeCookies([
+    ...results.filter((result) => result.status === "fulfilled").map((result) => result.value),
+    ...exactResults.filter((result) => result.status === "fulfilled").map((result) => result.value),
+    pageCookies,
+  ]);
+}
+
+async function readXhsPageCookies(tabId) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => {
+        const cookies = document.cookie.split(";").map((part) => {
+        const separator = part.indexOf("=");
+        if (separator < 1) return null;
+        const name = part.slice(0, separator).trim();
+        const rawValue = part.slice(separator + 1).trim();
+        try {
+          return { name, value: decodeURIComponent(rawValue), domain: location.hostname, path: "/" };
+        } catch {
+          return { name, value: rawValue, domain: location.hostname, path: "/" };
+        }
+        }).filter(Boolean);
+        // _dsl 不是 Cookie，但页面签名器会从这里读取 X-S-Common 的时间锚点。
+        if (window._dsl) cookies.push({ name: "_dsl", value: String(window._dsl), domain: location.hostname, path: "/" });
+        return cookies;
+      },
+    });
+    return Array.isArray(result) ? result : [];
+  } catch {
+    // 受限页面无法执行脚本时，仍使用 cookies API 的结果。
+    return [];
+  }
+}
+
+async function inspectXhsPageAuthentication(tabId) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => {
+        const bodyText = document.body?.innerText || "";
+        const hasLoginButton = [...document.querySelectorAll("button, a")].some((element) => /登录|注册登录/.test(element.textContent?.trim() || ""));
+        const hasUserLink = [...document.querySelectorAll('a[href*="/user/profile/"]')].some((link) => /[0-9a-f]{24}/i.test(link.href));
+        const hasLogoutText = /退出登录|我的笔记|创作中心/.test(bodyText);
+        const storageText = Object.keys(localStorage).some((key) => /user|login|session/i.test(key));
+        return { authenticated: (hasUserLink || hasLogoutText || storageText) && !hasLoginButton };
+      },
+    });
+    return Boolean(result?.authenticated);
+  } catch {
+    return false;
   }
 }
 
@@ -248,14 +374,26 @@ async function refreshContext() {
   if (state.running) return;
   elements.sessionBanner.classList.add("is-loading");
   elements.sessionTitle.textContent = "正在检测登录状态";
-  elements.sessionDetail.textContent = "读取当前 Chrome 的平台 Cookie";
+  elements.sessionDetail.textContent = state.platform === "xhs"
+    ? "读取当前 Chrome 的小红书 Cookie"
+    : "读取当前 Chrome 的平台 Cookie";
   setTaskStatus("");
   try {
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     state.tab = tab || null;
-    state.pageContext = parseDouyinPage(tab?.url || "");
+    state.pageContext = state.platform === "xhs" ? parseXhsPage(tab?.url || "") : parseDouyinPage(tab?.url || "");
     applyPageContext(state.pageContext);
-    const isDouyinTab = state.pageContext.kind !== "external";
+    const isTargetTab = state.pageContext.kind !== "external";
+    if (state.platform === "xhs") {
+      const cookies = tab?.id ? await readXhsCookies(tab.id) : [];
+      const pageAuthenticated = tab?.id ? await inspectXhsPageAuthentication(tab.id) : false;
+      state.profile = null;
+      state.login = inspectXhsLoginCookies(cookies, pageAuthenticated);
+      renderLoginStatus(state.login, isTargetTab);
+      setRunning(false);
+      return;
+    }
+    const isDouyinTab = isTargetTab;
     const cookies = tab?.id ? await readDouyinCookies(tab.id) : [];
     state.profile = isDouyinTab && tab?.id ? await inspectPageEnvironment(tab.id) : null;
     state.login = inspectLoginCookies(cookies, state.profile?.pageAuthenticated);
@@ -277,7 +415,7 @@ async function refreshContext() {
     elements.sessionBanner.classList.add("is-warning");
     elements.sessionTitle.textContent = "检测失败";
     elements.sessionDetail.textContent = error instanceof Error ? error.message : String(error);
-    elements.openDouyin.hidden = false;
+    elements.openPlatform.hidden = false;
   }
   setRunning(false);
 }
@@ -555,11 +693,27 @@ async function scrapeUserWorks(options) {
 }
 
 function getFormValues() {
-  const form = elements.forms.find((item) => item.dataset.form === state.mode);
+  // 按平台和模式取表单，避免同名的抖音表单遮挡小红书表单。
+  const form = elements.forms.find((item) => (
+    (item.dataset.platform || "douyin") === state.platform && item.dataset.form === state.mode
+  ));
   if (!form?.reportValidity()) {
     throw new Error("请检查输入参数");
   }
   const values = Object.fromEntries(new FormData(form));
+  if (state.platform === "xhs" && state.mode === "search") {
+    return { keyword: values.keyword.trim(), limit: Number(values.limit), sort: values.sort, noteType: Number(values.noteType), noteTime: 0, noteRange: 0, interval: Number(values.interval) };
+  }
+  if (state.platform === "xhs" && state.mode === "note") {
+    return { url: values.url.trim() };
+  }
+  if (state.platform === "xhs" && state.mode === "user") {
+    const user = values.user.trim();
+    return user.startsWith("http") ? { userUrl: user, limit: Number(values.limit), interval: Number(values.interval) } : { userId: user, limit: Number(values.limit), interval: Number(values.interval) };
+  }
+  if (state.platform === "xhs" && state.mode === "comments") {
+    return { url: values.url.trim(), limit: Number(values.limit), includeReplies: values.includeReplies === "on", interval: Number(values.interval) };
+  }
   if (state.mode === "search") {
     return {
       keyword: values.keyword.trim(),
@@ -595,7 +749,7 @@ async function runCrawler() {
     setTaskStatus("请先在目标平台标签页完成登录", true);
     return;
   }
-  if (!state.profile || state.pageContext?.kind === "external") {
+  if ((state.platform === "douyin" && !state.profile) || state.pageContext?.kind === "external") {
     setTaskStatus("请保持一个目标平台标签页处于当前活动状态", true);
     return;
   }
@@ -605,6 +759,25 @@ async function runCrawler() {
     state.cancelRequested = false;
     setRunning(true);
     setTaskStatus("正在准备请求");
+    // 先让浏览器绘制准备状态，避免后续签名等待时看起来像卡住。
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (state.platform === "xhs") {
+      const client = new XhsBrowserClient({
+        tabId: state.tab.id,
+        cookieMap: state.login.cookieMap,
+        onProgress: (message) => setTaskStatus(message),
+        shouldCancel: () => state.cancelRequested,
+      });
+      if (state.mode === "search") state.result = await client.searchNotes(options);
+      else if (state.mode === "note") state.result = await client.getNoteInfo(options);
+      else if (state.mode === "user") state.result = await client.getUserNotes(options);
+      else if (state.mode === "comments") state.result = await client.getNoteComments(options);
+      else throw new XhsRequestError("不支持的小红书抓取模式");
+      storeCurrentResult(state.result);
+      setTaskStatus(`抓取完成，共 ${state.result.items.length} 条`);
+      await saveFormState();
+      return;
+    }
     const client = new DouyinClient({
       profile: state.profile,
       cookieMap: state.login.cookieMap,
@@ -644,11 +817,11 @@ async function runCrawler() {
     } else {
       throw new Error("不支持的抓取模式");
     }
-    renderResult(state.result);
+    storeCurrentResult(state.result);
     setTaskStatus(`抓取完成，共 ${state.result.items.length} 条`);
     await saveFormState();
   } catch (error) {
-    if (error instanceof DouyinRequestError && error.code === "CANCELLED") {
+    if ((error instanceof DouyinRequestError || error instanceof XhsRequestError) && error.code === "CANCELLED") {
       setTaskStatus("任务已停止");
     } else {
       setTaskStatus(error instanceof Error ? error.message : String(error), true);
@@ -686,6 +859,62 @@ function getCommentInfo(item) {
   };
 }
 
+function getXhsInfo(item) {
+  const note = item?.note_card || item;
+  const user = item?.user || note?.user || note?.user_info || {};
+  // 搜索接口把笔记标题放在 note_card.display_title，而详情接口字段略有不同。
+  const text = note?.display_title || note?.title || note?.desc || note?.content
+    || item?.display_title || item?.content || item?.text
+    || item?.hot_query?.title || "无文本内容";
+  const interact = note?.interact_info || item?.interact_info || {};
+  return {
+    id: item?.id || note?.note_id || item?.note_id || item?.comment_id || "",
+    title: user?.nickname || user?.nick_name || item?.user_nickname || "小红书数据",
+    text,
+    meta: [
+      interact.liked_count != null ? `点赞 ${interact.liked_count}` : "",
+      interact.comment_count != null ? `评论 ${interact.comment_count}` : "",
+    ].filter(Boolean),
+  };
+}
+
+function getXhsNoteUrl(item) {
+  const note = item?.note_card || item;
+  const noteId = item?.id || item?.note_id || note?.note_id;
+  if (!/^[0-9a-f]{24}$/i.test(String(noteId || ""))) return "";
+  const token = item?.xsec_token || note?.xsec_token || "";
+  const params = new URLSearchParams({ xsec_source: "pc_search" });
+  if (token) params.set("xsec_token", token);
+  return `https://www.xiaohongshu.com/explore/${noteId}?${params.toString()}`;
+}
+
+function openXhsCrawler(mode, item) {
+  const url = getXhsNoteUrl(item);
+  if (!url) {
+    setTaskStatus("该结果缺少有效的笔记 ID，无法跳转", true);
+    return;
+  }
+  // 结果来自小红书时直接切换表单，不重新检测当前标签页。
+  state.platform = "xhs";
+  elements.platformSelect.value = "xhs";
+  setMode(mode);
+  const selector = mode === "note" ? "#xhs-note-form input[name=url]" : "#xhs-comments-form input[name=url]";
+  const input = document.querySelector(selector);
+  input.value = url;
+  input.focus();
+  input.scrollIntoView({ block: "nearest" });
+  setTaskStatus(mode === "note" ? "已填入笔记链接，请开始抓取详情" : "已填入笔记链接，请开始抓取评论");
+}
+
+async function openXhsNoteUrl(url) {
+  try {
+    // 新标签页打开原始链接，保留侧边栏中的搜索和用户笔记结果。
+    await chrome.tabs.create({ url });
+  } catch (error) {
+    setTaskStatus(`打开笔记链接失败：${error instanceof Error ? error.message : String(error)}`, true);
+  }
+}
+
 function renderResult(result) {
   elements.resultSection.hidden = false;
   elements.resultSummary.textContent = `${result.items.length} 条数据`;
@@ -693,7 +922,9 @@ function renderResult(result) {
   elements.resultList.replaceChildren();
   const visibleItems = result.items.slice(0, 30);
   visibleItems.forEach((item) => {
-    const info = result.kind === "comments"
+    const info = result.kind.startsWith("xhs-")
+      ? getXhsInfo(item)
+      : result.kind === "comments"
       ? getCommentInfo(item)
       : getWorkInfo(item);
     const row = document.createElement("article");
@@ -710,6 +941,30 @@ function renderResult(result) {
       meta.append(span);
     });
     row.append(title, text, meta);
+    if (result.kind === "xhs-search" || result.kind === "xhs-user-notes") {
+      const noteUrl = getXhsNoteUrl(item);
+      if (noteUrl) {
+        const actions = document.createElement("div");
+        actions.className = "result-actions";
+        const detailButton = document.createElement("button");
+        detailButton.type = "button";
+        detailButton.className = "secondary-button";
+        detailButton.textContent = "抓取笔记详情";
+        detailButton.addEventListener("click", () => openXhsCrawler("note", item));
+        const openButton = document.createElement("button");
+        openButton.type = "button";
+        openButton.className = "secondary-button";
+        openButton.textContent = "打开笔记";
+        openButton.addEventListener("click", () => openXhsNoteUrl(noteUrl));
+        const commentsButton = document.createElement("button");
+        commentsButton.type = "button";
+        commentsButton.className = "secondary-button";
+        commentsButton.textContent = "抓取笔记评论";
+        commentsButton.addEventListener("click", () => openXhsCrawler("comments", item));
+        actions.append(detailButton, commentsButton, openButton);
+        row.append(actions);
+      }
+    }
     elements.resultList.append(row);
   });
   if (result.items.length > visibleItems.length) {
@@ -728,6 +983,13 @@ function csvEscape(value) {
 }
 
 function resultToCsv(result) {
+  if (result.kind.startsWith("xhs-")) {
+    const rows = result.items.map((item) => {
+      const info = getXhsInfo(item);
+      return [info.id, info.title, info.text, JSON.stringify(item)];
+    });
+    return [["id", "author", "text", "raw_json"], ...rows].map((row) => row.map(csvEscape).join(",")).join("\r\n");
+  }
   const isComment = result.kind === "comments";
   const headers = isComment
     ? [
@@ -794,16 +1056,17 @@ function downloadFile(content, type, extension) {
 
 async function saveFormState() {
   const forms = Object.fromEntries(elements.forms.map((form) => [
-    form.dataset.form,
+    `${form.dataset.platform || "douyin"}:${form.dataset.form}`,
     Object.fromEntries(new FormData(form)),
   ]));
-  await chrome.storage.local.set({ forms, mode: state.mode });
+  await chrome.storage.local.set({ forms, mode: state.mode, platform: state.platform });
 }
 
 async function restoreFormState() {
-  const saved = await chrome.storage.local.get(["forms", "mode"]);
-  Object.entries(saved.forms || {}).forEach(([mode, values]) => {
-    const form = elements.forms.find((item) => item.dataset.form === mode);
+  const saved = await chrome.storage.local.get(["forms", "mode", "platform"]);
+  Object.entries(saved.forms || {}).forEach(([key, values]) => {
+    const [platform, mode] = key.includes(":") ? key.split(":", 2) : ["douyin", key];
+    const form = elements.forms.find((item) => (item.dataset.platform || "douyin") === platform && item.dataset.form === mode);
     if (!form) return;
     Object.entries(values).forEach(([name, value]) => {
       const control = form.elements.namedItem(name);
@@ -816,7 +1079,9 @@ async function restoreFormState() {
       }
     });
   });
+  if (saved.platform) state.platform = saved.platform === "xhs" ? "xhs" : "douyin";
   if (saved.mode) setMode(saved.mode);
+  elements.platformSelect.value = state.platform;
 }
 
 function scheduleContextRefresh() {
@@ -827,12 +1092,14 @@ function scheduleContextRefresh() {
 elements.modeTabs.forEach((button) => {
   button.addEventListener("click", () => setMode(button.dataset.mode));
 });
+elements.platformSelect.addEventListener("change", (event) => setPlatform(event.target.value));
 elements.refreshContext.addEventListener("click", refreshContext);
-elements.openDouyin.addEventListener("click", async () => {
-  if (state.pageContext?.kind === "douyin") {
+elements.openPlatform.addEventListener("click", async () => {
+  const home = state.platform === "xhs" ? "https://www.xiaohongshu.com/explore" : "https://www.douyin.com/";
+  if (state.pageContext?.kind !== "external") {
     await chrome.tabs.reload(state.tab.id);
   } else {
-    await chrome.tabs.create({ url: "https://www.douyin.com/" });
+    await chrome.tabs.create({ url: home });
   }
 });
 elements.runButton.addEventListener("click", runCrawler);
@@ -858,7 +1125,15 @@ elements.downloadCsv.addEventListener("click", () => {
 
 chrome.tabs.onActivated.addListener(scheduleContextRefresh);
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (tabId === state.tab?.id && changeInfo.url) scheduleContextRefresh();
+  if (tabId === state.tab?.id && (changeInfo.url || changeInfo.status === "complete")) scheduleContextRefresh();
+});
+chrome.cookies.onChanged.addListener((changeInfo) => {
+  const domain = String(changeInfo.cookie?.domain || "").replace(/^\./, "").toLowerCase();
+  const name = String(changeInfo.cookie?.name || "").toLowerCase();
+  if (state.platform === "xhs" && domain.endsWith("xiaohongshu.com")
+    && ["a1", "web_session", "webid", "gid", "id_token", "secure_session"].includes(name)) {
+    scheduleContextRefresh();
+  }
 });
 chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
   if (details.frameId === 0 && details.tabId === state.tab?.id) {
@@ -867,4 +1142,5 @@ chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
 });
 
 await restoreFormState();
+setMode(state.mode);
 await refreshContext();

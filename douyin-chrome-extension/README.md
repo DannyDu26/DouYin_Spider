@@ -1,8 +1,9 @@
 # 短视频数据助手 Chrome 插件
 
 这是一个独立运行的 Manifest V3 插件，不需要启动本仓库的 FastAPI 服务，也不使用数据库。
-插件使用当前 Chrome 配置文件中的平台登录状态。搜索和评论请求在当前平台标签页中发起，
-用户作品请求由扩展 Service Worker 直接发送。
+插件使用当前 Chrome 配置文件中的平台登录状态。抖音和小红书请求都在当前平台标签页的
+MAIN world 中发起，直接携带浏览器 Cookie；小红书的 MNS/X-S-Common 签名在扩展本地生成，
+不上传 Cookie 或登录凭证。
 
 ## 功能
 
@@ -12,6 +13,8 @@
 - 按总数量自动分页读取用户作品，接口持续拒绝时回退到主页滚动读取。
 - 按总数量自动分页获取视频评论，可选择是否包含二级回复。
 - 预览结果并导出 JSON 或 CSV。
+- 小红书笔记搜索、笔记详情、用户笔记和一级评论（可包含回复）。
+- 小红书请求复用当前页面签名器，并提供本地 MNS/X-S-Common 生成回退。
 - 用户输入参数保存在扩展本地存储中，Cookie 不会写入扩展存储。
 
 ## 安装
@@ -20,8 +23,8 @@
 2. 开启右上角的“开发者模式”。
 3. 点击“加载已解压的扩展程序”。
 4. 选择本目录 `douyin-chrome-extension`。
-5. 打开任意 `https://www.douyin.com/` 页面并完成登录。
-6. 点击工具栏中的“短视频数据助手”，侧边栏会自动识别当前页面。
+5. 打开任意 `https://www.douyin.com/` 或 `https://www.xiaohongshu.com/` 页面并完成登录。
+6. 点击工具栏中的“短视频数据助手”，选择平台后开始采集。
 
 ## 使用
 
@@ -31,6 +34,9 @@
 总数量和“包含回复”开关，
 请求间隔、游标与每页数量由插件自动管理。遇到安全验证时应停止任务，
 在平台页面完成验证后再继续。
+
+选择“小红书”后，搜索、笔记详情、用户笔记和评论使用当前小红书标签页的 Cookie 直接请求。
+笔记链接需要携带页面或搜索结果中的 `xsec_token`；用户笔记支持主页链接或 24 位用户 ID。
 
 ## 隐私政策与商店提交
 
@@ -46,7 +52,7 @@
 
 | 权限 | 用途 |
 | --- | --- |
-| `cookies` | 检测平台登录 Cookie |
+| `cookies` | 检测当前平台登录 Cookie |
 | `declarativeNetRequestWithHostAccess` | 为 mssdk 换取 token 的请求临时设置会话请求头 |
 | `activeTab` | 识别用户当前操作的标签页 |
 | `scripting` | 在当前平台页面中使用登录状态发起同源请求 |
@@ -54,6 +60,7 @@
 | `storage` | 保存用户填写的非敏感参数 |
 | `webNavigation` | 识别目标平台单页应用内部的 URL 切换 |
 | `https://*.douyin.com/*` | 仅允许操作目标平台域名 |
+| `https://xiaohongshu.com/*`、`https://*.xiaohongshu.com/*` | 在已登录的小红书页面中发起同源请求 |
 | `https://mssdk.bytedance.com/*` | 换取用户作品查询使用的动态 `msToken` |
 
 ## 实现说明
@@ -66,6 +73,7 @@
 - 搜索、一级评论和评论回复遇到临时拒绝或无效响应时会重新签名并有限重试。
 - 用户作品优先调用作品列表接口，随机 403 时重新签名并有限重试。
 - 用户作品查询 token 通过 mssdk 动态生成，并按当前浏览器 `ttwid` 和指纹上报数据换取。
+- 小红书请求由浏览器标签页携带 Cookie，本地生成 MNS/X-S-Common；页面已加载的签名器可补充 RAP 等动态请求头。
 - 动态 `msToken` 缓存 10 分钟；连续两次 403 后强制刷新一次，最多尝试 5 次。
 - 用户作品在 Service Worker 中直接请求，避免页面安全 SDK 追加或重排查询参数。
 - 用户作品参数顺序与后端 API 一致，请求 Cookie 会移除旧的 `msToken`。
@@ -82,6 +90,7 @@
 
 ```powershell
 node douyin-chrome-extension/tests/extension-tests.mjs
+node douyin-chrome-extension/tests/xhs-extension-tests.mjs
 node douyin-chrome-extension/tests/service-worker-tests.mjs
 node --check douyin-chrome-extension/lib/mstoken.js
 node --check douyin-chrome-extension/sidepanel.js

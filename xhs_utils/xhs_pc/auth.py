@@ -456,6 +456,30 @@ class XHSPcAuth(XHSAuth):
         return auth
 
     @classmethod
+    def from_saved_state(cls, cookies: Any, **auth_kwargs) -> 'XHSPcAuth':
+        """离线恢复数据库快照，首次业务请求再验证登录。"""
+        return cls(cookies=cookies, _factory_token=_AUTH_FACTORY_TOKEN, **auth_kwargs)
+
+    @classmethod
+    def from_login_client(cls, login, cookies: Any, user_id: str, *, login_source='phone') -> 'XHSPcAuth':
+        """接管登录客户端，保留 SSK、设备和按域 Cookie。"""
+        return cls.from_saved_state(
+            cookies, login_source=login_source, user_id=user_id, dsl=login.dsl,
+            proxies=login.proxies, http_client=login.http, profile=login.profile,
+            host_cookie_state=login.host_cookie_state(),
+            cookie_source_url=PC_PLATFORM_CONFIG.origin('api'),
+        )
+
+    def merge_response_cookies(self, response) -> None:
+        """统一合并响应 Cookie，并保留域隔离和请求顺序。"""
+        values = self.profile.cookie_map
+        self._cookie_store.merge_response(values, response)
+        self.profile.update_cookies(values)
+        self.cookies = cookie_header(self.profile.cookie_map)
+        self.host_cookies = self._cookie_store.snapshot()
+        self._sync_storage_from_profile()
+
+    @classmethod
     def from_qrcode_login(
         cls,
         *,

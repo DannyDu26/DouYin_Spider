@@ -1,6 +1,6 @@
-# 抖音爬虫内部 API 服务
+# 抖音与小红书内部 API 服务
 
-基于 FastAPI 的公司内部抖音数据抓取服务，提供作品详情、视频一级与二级评论、用户作品和关键词搜索接口，并通过扫码登录维护 MySQL 多账号 Cookie 池。
+基于 FastAPI 的公司内部数据抓取服务，提供抖音作品、评论、用户作品和搜索，以及小红书笔记、用户、搜索和评论分页接口。抖音使用扫码登录，小红书支持短信验证码和纯 HTTP 扫码登录，两个平台分别维护 MySQL 多账号池。
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-Internal_API-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -48,6 +48,19 @@ scripts/legacy_cli.py 保留原项目的 Excel、媒体和详情文件落盘能�
 | POST | /api/v1/douyin/video_sub_comments | 分页抓取指定一级评论的二级评论 |
 | POST | /api/v1/douyin/user_videos | 按用户主页抓取 1–10 页作品 |
 | POST | /api/v1/douyin/search_videos | 按关键词搜索最多 100 个作品 |
+| POST | /api/v1/xhs/note_info | 小红书笔记详情 |
+| POST | /api/v1/xhs/search_notes | 分页搜索小红书笔记 |
+| POST | /api/v1/xhs/user_info | 小红书用户信息 |
+| POST | /api/v1/xhs/user_notes | 分页获取小红书用户笔记 |
+| POST | /api/v1/xhs/note_comments | 分页获取小红书一级评论 |
+| POST | /api/v1/xhs/note_sub_comments | 分页获取小红书评论回复 |
+| POST | /api/v1/xhs/auth/sms/send | 初始化并发送短信验证码 |
+| POST | /api/v1/xhs/auth/sms/login | 提交验证码并保存登录凭证 |
+| POST | /api/v1/xhs/auth/qr/create | 创建扫码二维码，返回 PNG Data URL |
+| POST | /api/v1/xhs/auth/qr/login | 服务端等待扫码确认并保存登录凭证 |
+| GET | /api/v1/xhs/auth/accounts | 查询小红书账号池 |
+
+小红书两种登录均只需两次请求：短信发送验证码后提交验证码；扫码先创建二维码，再调用扫码登录等待手机确认。客户端无需轮询。登录、缓存和完整请求示例见 [小红书 API 接入说明](docs/小红书API接入说明.md)。
 
 服务启动后可以直接使用：
 
@@ -64,7 +77,7 @@ scripts/legacy_cli.py 保留原项目的 Excel、媒体和详情文件落盘能�
 - Playwright Chromium，用于扫码登录
 - Docker，可选
 
-当前签名实现为纯 Python，启动 API 不需要安装 Node.js。
+小红书的 PC 与共享核心签名使用 Node.js，要求支持 `zlib.crc32`。安装 Python 依赖后执行 `npm ci --omit=dev --ignore-scripts`。Docker 会安装并检查运行时。仅运行抖音时可配置 `XHS_ENABLED=false`。
 
 ### 2. 安装依赖
 
@@ -112,6 +125,7 @@ MYSQL_HOST=127.0.0.1
 MYSQL_PORT=3306
 MYSQL_DATABASE=auto_crawler
 CRAWLER_PROJECT_ID=22
+XHS_PROJECT_ID=38
 MYSQL_USER=crawler_dev
 MYSQL_PASSWORD=请替换为本地密码
 MYSQL_SSL_DISABLED=true
@@ -149,20 +163,20 @@ CREATE TABLE IF NOT EXISTS crawler_cookie (
   type varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT 'Cookie类型',
   account_id varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '账号ID',
   cookie text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT 'Cookie内容',
-  remark varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '备注',
+  remark text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '备注或平台登录状态JSON',
   create_time datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   PRIMARY KEY (id),
   KEY idx_project_type_account_id (project_id,type,account_id,id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='项目Cookie管理表';
 ~~~
 
-数据库名和项目 ID 由环境配置决定。示例 dev/prod 均配置 `MYSQL_DATABASE=auto_crawler`、`CRAWLER_PROJECT_ID=22`；服务只操作该项目下 `type=douyin_api_account_v1` 的记录。
+数据库名和项目 ID 由环境配置决定。示例 dev 使用 `CRAWLER_PROJECT_ID=22`、`XHS_PROJECT_ID=38`，prod 使用 `CRAWLER_PROJECT_ID=22`、`XHS_PROJECT_ID=42`；抖音操作 `CRAWLER_PROJECT_ID` 项目下 `type=douyin_api_account_v1` 的记录，小红书操作 `XHS_PROJECT_ID` 项目下 `type=xhs_api_account_v1` 的记录。
 
 | 表字段 | 本项目用途 |
 | --- | --- |
 | id | 自增凭证记录 ID；历史重复记录存在时使用最大 id 的记录 |
-| project_id | 使用 CRAWLER_PROJECT_ID 配置值，示例为 22 |
-| type | 固定为 douyin_api_account_v1 |
+| project_id | 抖音使用 CRAWLER_PROJECT_ID，小红书使用 XHS_PROJECT_ID |
+| type | 按平台使用 douyin_api_account_v1 或 xhs_api_account_v1 |
 | account_id | 稳定账号别名，新记录使用该字段分组 |
 | cookie | 新记录保存分号间隔的标准 Cookie 字符串；兼容历史版本化凭证 JSON |
 | remark | 普通备注，不参与账号识别 |
@@ -435,7 +449,8 @@ curl -X POST "http://127.0.0.1:5000/api/v1/douyin/search_videos" \
 | MYSQL_HOST | 按环境文件 | MySQL 地址 |
 | MYSQL_PORT | 按环境文件 | MySQL 端口 |
 | MYSQL_DATABASE | auto_crawler | 凭证表所在数据库 |
-| CRAWLER_PROJECT_ID | 22 | 项目 Cookie 隔离 ID，必须是正整数 |
+| CRAWLER_PROJECT_ID | 22 | 抖音项目 Cookie 隔离 ID，必须是正整数 |
+| XHS_PROJECT_ID | dev=38，prod=42 | 小红书项目 Cookie 隔离 ID，必须是正整数 |
 | MYSQL_USER / MYSQL_PASSWORD | 必填 | MySQL 账号和密码 |
 | MYSQL_SSL_DISABLED | false | 仅本地 dev 可设为 true |
 | MYSQL_SSL_CA | 未设置 | 远程 MySQL 必须配置的 CA |

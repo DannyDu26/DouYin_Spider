@@ -1,0 +1,261 @@
+{
+  "sign_vectors": [
+    {
+      "input": {
+        "api": "/api/sns/web/v2/search/notes",
+        "data": {
+          "keyword": "fixture",
+          "page": 1
+        },
+        "cookie": "a1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; webBuild=6.47.2; loadts=1720000000000",
+        "a1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "b1": "",
+        "dslPair": "1720000000000;1720000000000",
+        "tier": "0201",
+        "now": 1720000000200,
+        "xt": "1720000000200",
+        "version": 305419896,
+        "loadts": 1720000000000,
+        "seq": 19,
+        "envConst": 1315,
+        "envFpTail": [
+          248,
+          83,
+          103,
+          103,
+          201,
+          181,
+          129,
+          99,
+          94,
+          7,
+          68,
+          250,
+          132,
+          21
+        ],
+        "webBuild": "6.47.2",
+        "webSsk": {
+          "xhs-pc-web": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v"
+        },
+        "sskRandom": 23,
+        "sskTimestamp": 17
+      },
+      "expected": {
+        "x3": "mns0201_+MP+X6Qjy6TE8lK/r8fbbgH0IA0EoFit6bTcQKaJNkuJsLaBNKSJ4jvXew8cMNvAKNcCd+Hvg+VXuhfe9XcUzpB4Jsm/vghgimgSU0hQbBKejVFgBTFJzwsOjufs094H47XWRPOlcRjj/lry479B90tmPp0+ssuXlQv4wOexYisVa3X8F6g4vybJkqAP73yPmY3ZtF==",
+        "xs": "XYS_2UQhPsHCH0c1+shAHjIj2erjwjQhyoPTqBPT49pjHjIj2eHjwjQgynEDJ74AHjIj2ePjwjQTJdPIP0ZlgUT+LsTG+Sbx2/8Lz/YVaURUwB8jGf4HPrSmPrp6zfSF+fQLGMbNGLkwy7ptqFlYcDENLFiFyd8G8gqhGFMw4DbN/f+e8sTH4fq3pSYMyB8SwpY0pgkIc0ztq9F64f4i89ST8M+pPBYzGDQN8nknzf4spr8t2d4A/9kM8dPIw/zH+e4GpMQc/9l0LfkxN9lU2/c7wLHEPozTLoZIt7+A4pYVLgGF4FRS2bSkqM8YPMWhz08d+o8EGDk3qLbc+A+ELBM8PMkFz0FRHjIj2ecjwjQ6GfkSG7cjNsQh+aHCH0WIG/4Swn+Y8ecFwnG78eqAGnG7w/8D+/q9G/+jGfPhHjIj2eGjwdVj2BYANgm0Ng4SGjHCHSbbPrbQqfkYyDlocUTFy/rI+FMP4rYCznbiqAFjKaIj2eqjwdVj2BYANgm0Ng4SGjHCHDTmcLbmcLMYqrEzp9Mg4SSpnriM20Ghzf8PzrRs+AGUaL+byLSELnltyn+6aM+6qDlePopP4AFRHdMR",
+        "xt": "1720000000200",
+        "len": 208,
+        "prefix": "mns0201_+MP+",
+        "tier": "0201",
+        "pure": true,
+        "xs_common": "2UQAPsHC+aIjqArjwjHjNsQhPsHCH0rjNsQhPaHCH0c1+shAHjIj2eHjwjQgynEDJ74AHjIj2ePjwjQhyoPTqBPT49pjHjIj2ecjwjH9N0c7N0HjNsQh+aHCHfbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnrjNsQh+jHCHjHVHdW7H0ijHjIj2eWjwfEMJBIVHdWEH0iTw/Plw/LFwePANsQhP/Zjw0ZVHdWlPaHCHfE6qfMYJsHVHdWlPjHCH0r7P0ZIPeZIPeZIPeZvP/qUPeZIPeZIPeZIPsQR"
+      }
+    },
+    {
+      "input": {
+        "api": "/api/sns/web/v2/search/notes",
+        "data": {
+          "keyword": "fixture",
+          "page": 1
+        },
+        "cookie": "a1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; webBuild=6.47.2; loadts=1720000000000",
+        "a1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "b1": "",
+        "dslPair": "1720000000000;1720000000000",
+        "tier": "0101",
+        "now": 1720000000200,
+        "xt": "1720000000200",
+        "version": 305419896,
+        "loadts": 1720000000000,
+        "seq": 19,
+        "envConst": 1327,
+        "envFpTail": [
+          249,
+          83,
+          103,
+          103,
+          201,
+          181,
+          129,
+          99,
+          94,
+          7,
+          68,
+          250,
+          132,
+          21
+        ],
+        "webBuild": "6.47.2",
+        "webSsk": {
+          "xhs-pc-web": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v"
+        },
+        "sskRandom": 23,
+        "sskTimestamp": 17
+      },
+      "expected": {
+        "x3": "mns0101_W9Qe4dc2BjwQ5i4gX1XQgDxlCPBj5ghuIMXdjF200l+poiYp0508dP3FvitvD33P8aRRNMIK9IKChOM3ZC5S/S7GQHudjIScwa47NdF+bEl3WLdx6H55jBYRjxk83Pae2zQNT2PPS7GMETgYkPvEwe531tCKfmupTdQpSnlnL/YwSCYmZ9kwzDLNgDMLaL8cnypt6",
+        "xs": "XYS_2UQhPsHCH0c1+shAHjIj2erjwjQhyoPTqBPT49pjHjIj2eHjwjQgynEDJ74AHjIj2ePjwjQTJdPIP/ZlgMqELnLF8BPUcfk7L/pk+B4GPpYz8FzhJr+ccfiM89YMaLMG8BkBP0ZIJsTIJ9S8qeZMPeYDLe+B4fSF4DcAPMZhGpQa/DMQaASQaF+i/FFAnDPMLUR/+F4zaopDyDS/G74Y+e4w8rG3GDpVPM4P8oW9aeLMyDQ8LfkhyAWALBbSPdkz/ScULbm/+F4+zpzdnnTc4Dp78/LAPgzea98T4gmL8bbIL9EVJDI6ng4/cMSTn0S347kr/rEdzrMPGLIhG9EEqoc9HjIj2ecjwjQ6GfkSG7cjNsQh+aHCH0WIG/4Swn+Y8ecFwnG78eqAGnG7w/8D+/q9G/+jGfPhHjIj2eGjwdVj2BYANgm0Ng4SGjHCHSbbPrbQqfkYyDlocUTFy/rI+FMP4rYCznbiqAFjKaIj2eqjwdVj2BYANgm0Ng4SGjHCHDTmcLbmcLMYqrEzp9Mg4SSpnriM20Ghzf8PzrRs+AGUaL+byLSELnltyn+6aM+6qDlePopP4AFRHdMR",
+        "xt": "1720000000200",
+        "len": 205,
+        "prefix": "mns0101_W9Qe",
+        "tier": "0101",
+        "pure": true,
+        "xs_common": "2UQAPsHC+aIjqArjwjHjNsQhPsHCH0rjNsQhPaHCH0c1+shAHjIj2eHjwjQgynEDJ74AHjIj2ePjwjQhyoPTqBPT49pjHjIj2ecjwjH9N0c7N0HjNsQh+aHCHfbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnrjNsQh+jHCHjHVHdW7H0ijHjIj2eWjwfEMJBIVHdWEH0iTw/Plw/LFwePANsQhP/Zjw0ZVHdWlPaHCHfE6qfMYJsHVHdWlPjHCH0r7P0ZIPeZIPeZIPeZvP/qUPeZIPeZIPeZIPsQR"
+      }
+    },
+    {
+      "input": {
+        "api": "/api/sns/web/v2/search/notes",
+        "data": {
+          "keyword": "fixture",
+          "page": 1
+        },
+        "cookie": "a1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; webBuild=6.47.2; loadts=1720000000000",
+        "a1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "b1": "",
+        "dslPair": "1720000000000;1720000000000",
+        "tier": "0301",
+        "now": 1720000000200,
+        "xt": "1720000000200",
+        "version": 305419896,
+        "loadts": 1720000000000,
+        "seq": 19,
+        "envConst": 1352,
+        "envFpTail": [
+          249,
+          65,
+          103,
+          103,
+          201,
+          181,
+          129,
+          99,
+          94,
+          7,
+          68,
+          250,
+          132,
+          21
+        ],
+        "webBuild": "6.47.2",
+        "webSsk": {
+          "xhs-pc-web": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v"
+        },
+        "sskRandom": 23,
+        "sskTimestamp": 17
+      },
+      "expected": {
+        "x3": "mns0301_gRaKqMGsr9l5slJio30idIUz/zIPR85Vm7jxYGkI2jnF7I4dmXt+UP9ngJtQoYnUBuRxcdezqmH8RDhwFuvgzIQ90ShpAeugdiffU8Ri2mWtKdq/U/Bwgu2A3HBjdPZsq+MCnpsRzRJPUaT3l2nKSndVZlckE0JRIk0OHNRRTMrGLWyKklZpBQ+9q26wYer7",
+        "xs": "XYS_2UQhPsHCH0c1+shAHjIj2erjwjQhyoPTqBPT49pjHjIj2eHjwjQgynEDJ74AHjIj2ePjwjQTJdPIPAZlg94aGLTl/L4Aq0SV+g+VafS6PAmk8rSp2jRCapmawepnJ/4x2bSoyFDUyfEB+FDF8BMG4sTpLeS18FkFLnR8JSps4pQhG9zS2dbTaeYazBY7zdp987kQL/DIL9YIcnpM89zk8f8pwbQkPfMg4rTDqaRpNFQ787LUc/+HcfkDLbkAqaT+c9EIqMQCLDkcpnbLP9IUJDT/Jfznnfl0yFLIaSQQyAmOarEaLSz+qD4Pp7SNy9lyqrQztASlP087nnpU+UHVHdWFH0ijJ9Qx8n+FHjIj2eLjwjHhPBr78/S0GncF+eSf+9c7P9bf+AD98eL7+frAGfQ0wsHVHdW9H0kvHdYiqUMIGUM78nHjwjQzz/mmagQxGnkPzFP34BDlPe4+/ozH2DpYyoPRHdFVHdW7H0kvHdYiqUMIGUM78nHjwjQNcLbmcLb+GgmwLp4Tp788ppYt+gi9wr8f/rzOc0q9PDSeznSQ2pbVafS0JFT/J7QPcAmM/oqROaQRKc==",
+        "xt": "1720000000200",
+        "len": 200,
+        "prefix": "mns0301_gRaK",
+        "tier": "0301",
+        "pure": true,
+        "xs_common": "2UQAPsHC+aIjqArjwjHjNsQhPsHCH0rjNsQhPaHCH0c1+shAHjIj2eHjwjQgynEDJ74AHjIj2ePjwjQhyoPTqBPT49pjHjIj2ecjwjH9N0c7N0HjNsQh+aHCHfbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnbYGnrjNsQh+jHCHjHVHdW7H0ijHjIj2eWjwfEMJBIVHdWEH0iTw/Plw/LFwePANsQhP/Zjw0ZVHdWlPaHCHfE6qfMYJsHVHdWlPjHCH0r7P0ZIPeZIPeZIPeZvP/qUPeZIPeZIPeZIPsQR"
+      }
+    }
+  ],
+  "b1": {
+    "options": {
+      "now": 1720000000200,
+      "x39": 22,
+      "x50": "131,88,103",
+      "secCanvas": "__SEC_CAV__1-1-1-1-1|",
+      "windowKeys": [
+        "_BHjFmfUMEtxhI",
+        "_AUuXfEG27Xa3x",
+        "__xhsPendingNotePoint25300ReportMap",
+        "__xhsReportedNotePoint25300RecordMap",
+        "setImDebugMode",
+        "anti_hp_sign_config",
+        "__rap_app_id__",
+        "__rap_report__",
+        "__rap_last_sign_cost__",
+        "__rap_last_transform_cost__",
+        "__rap_hijack_installed__",
+        "__ed1a7dddf7c818e4bd",
+        "__hp_xhs_search_input_state__",
+        "__hp_xhs_search_submit_state__"
+      ],
+      "telemetry": {
+        "profile": "active",
+        "timeOrigin": 1719999997972.2,
+        "mouse": {
+          "me": 50,
+          "mm": 50,
+          "md": 3,
+          "mu": 3,
+          "c": 3,
+          "dc": 1
+        },
+        "keyboard": {},
+        "page": {
+          "ulr": 5,
+          "ps": 1,
+          "f": 20,
+          "b": 19,
+          "vc": 2,
+          "rs": 1,
+          "sc": 1
+        },
+        "state": {
+          "h": 0,
+          "f": 1,
+          "kr": 0
+        },
+        "features": {
+          "ae": 2.8905690597867015,
+          "ak": 5.664426623996462,
+          "cdr": 0.15566784512304102,
+          "bf": {
+            "ar": 0.9785478547854786,
+            "fr": 6.242728437964205
+          },
+          "fi": 3363
+        }
+      },
+      "overrides": {
+        "x36": "2"
+      }
+    },
+    "sha256": "689ee89f1d5189a6bc62117ca3b5dd5fa0f7fe06074872c23b2af3f1310c8766"
+  },
+  "profile": {
+    "options": {
+      "fields": {},
+      "timestampMs": 1720000000200,
+      "ets": 1720000000000,
+      "documentCookie": "a1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; webBuild=6.47.2; loadts=1720000000000",
+      "timeOrigin": 1720000000000,
+      "i12Seed": 1,
+      "telemetryFi": 10
+    },
+    "sha256": "e43d4589749a0c679bd63b49389ecf53d9f190928c66d16646cca7725528d7cd"
+  },
+  "asset_manifest": {
+    "xhs_core/js/b1.js": "944c17f17b41f00244a0252a61e272b0058ee5631e65ea8d7eedddcefce0216b",
+    "xhs_core/js/mns.js": "81fa29bf3577f2c24aa2e39550fc7e0d9593220597591cb9108810bd2838eeed",
+    "xhs_core/js/mns_0101_keystream.json": "b43be6754aceecca4c48e0797524dfa3b8bd97031fb039ad57bcb52da57e001e",
+    "xhs_core/js/mns_keystreams.json": "b3b5d635c03429990cb4ebbe9a1515253c255261939c476c87f1e3d2455aace4",
+    "xhs_core/js/sign.js": "0fc32f689ab95261eaae7ff0ba15f02c1877488f3ee007dfdb00bc7ef59dbe11",
+    "xhs_core/js/websectiga_cli.js": "90220c5e6c1bca8c552a3c3891a8efeacc00ff10618aa604bdb667bb7692688f",
+    "xhs_core/js/websectiga_env.js": "9cf37abb8181abc00e12ad53df29b2466143628e387044a6dc00c5d43702507f",
+    "xhs_core/js/xs_common.js": "752e0da8f476465f6e0365c6a3c835a4149584f36fc3a7788e5d759b1f60af4c",
+    "xhs_pc/js/aes_decrypt.js": "8068e47182ccd0d106b9db88dfedc273668feb886954fb875ea4602cb6965471",
+    "xhs_pc/js/aes_encrypt.js": "1815947980c92e57132dcb81e57cca876da7dc3ed7eab49a37cfc33787e4846c",
+    "xhs_pc/js/b1.js": "4e185be676b50e867669da27bf5cefd25316d35fafdaa2463c2c0790398c93e3",
+    "xhs_pc/js/deflate.js": "6dcd32c5c50a86e78c1dc472d8f17a6b22f8c34df6a70c71acdb772b1200ec3b",
+    "xhs_pc/js/mns.js": "553b8cf0945f50dec966fd099ec4f4e3b5b3a9193fcadfd7f4815ad35fefe8b2",
+    "xhs_pc/js/profile.js": "2339f0376d1a93f4a70e1d626bc01d951641f4d812d27d0f25c2ed002b271942",
+    "xhs_pc/js/rap.js": "904f4c57fd903dca9e6a53e948314388745893de110be72e4ef28a0da09e03a4",
+    "xhs_pc/js/rap_cli.js": "58cf124f0c2fd8bd781bc1daf547bc4842e09b83b4602754276bc39fcc583aa1",
+    "xhs_pc/js/rap_crypto.js": "c528846b840abc5af51debe66ca94d17c97a3c060986d922e23fa0271379b04a",
+    "xhs_pc/js/rap_fingerprint_template.json": "25f2b906d4857da8c5039b2601e55ae1a40d0b87d7e49069e6ea4fa9506e0431",
+    "xhs_pc/js/reference_profile.json": "2d02792cbae32bd3b15dd3d719cd0c38f0154ef9c05be4cf067d55f5969df10f",
+    "xhs_pc/js/sign.js": "08525004e6c09065cecd83ca8cb5e14efeaf92cb15bc03142f6a0ead4d0c577c",
+    "xhs_pc/js/web_ssk.js": "e4fb2e2005f14b5cc36e1a3bb79c79e63b6a7e2d9bc4871289427937d43ad96d",
+    "xhs_pc/js/xs_common.js": "abb34c0bc3bff473921087968871c19530377398fbff48406e418afb05a2b871"
+  }
+}
