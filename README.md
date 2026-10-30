@@ -58,9 +58,15 @@ scripts/legacy_cli.py 保留原项目的 Excel、媒体和详情文件落盘能�
 | POST | /api/v1/xhs/auth/sms/login | 提交验证码并保存登录凭证 |
 | POST | /api/v1/xhs/auth/qr/create | 创建扫码二维码，返回 PNG Data URL |
 | POST | /api/v1/xhs/auth/qr/login | 服务端等待扫码确认并保存登录凭证 |
+| POST | /api/v1/xhs/auth/cookie/import | 插件手动同步浏览器登录，需独立同步密钥 |
+| POST | /api/v1/douyin/auth/cookie/import | 插件手动同步抖音浏览器登录，需抖音同步密钥 |
 | GET | /api/v1/xhs/auth/accounts | 查询小红书账号池 |
 
 小红书两种登录均只需两次请求：短信发送验证码后提交验证码；扫码先创建二维码，再调用扫码登录等待手机确认。客户端无需轮询。登录、缓存和完整请求示例见 [小红书 API 接入说明](docs/小红书API接入说明.md)。
+
+小红书业务请求默认统一串行，每次完成后等待 5～10 秒；风控账号默认冷却 15 分钟，上游 503 最多退避重试两次。收到 429/503 时按 `error.code`、`error.details.reason` 和 `Retry-After` 处理，避免立即循环重试。配置项和错误处理方式见接入说明的“运行参数与错误”。调度状态在进程内，维持单实例、单 worker。
+
+已在 Chrome 登录的抖音或小红书账号也可通过插件手动同步到服务端，抖音配置 `DOUYIN_COOKIE_IMPORT_TOKEN`，小红书配置 `XHS_COOKIE_IMPORT_TOKEN` 后使用。见 [浏览器 Cookie 同步说明](docs/浏览器Cookie同步.md)。
 
 服务启动后可以直接使用：
 

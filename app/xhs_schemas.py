@@ -1,10 +1,27 @@
 """小红书 API 请求校验，统一解析完整链接与 ID。"""
 import re
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from app.account_store import validate_account_id
+from app.browser_cookie_import import parse_browser_cookie
+
+
+def parse_positive_int(value: Any, min_val: int = 1, max_val: int = 1000, name: str = '搜索页码') -> int:
+    """解析并校验正整数，兼容纯数字字符串。"""
+    if isinstance(value, bool):
+        raise ValueError(f'{name}必须为 {min_val}～{max_val} 的整数')
+    if isinstance(value, str):
+        value = value.strip()
+        if not value.isdigit():
+            raise ValueError(f'{name}必须为 {min_val}～{max_val} 的整数')
+        value = int(value)
+    elif not isinstance(value, int):
+        raise ValueError(f'{name}必须为 {min_val}～{max_val} 的整数')
+    if not (min_val <= value <= max_val):
+        raise ValueError(f'{name}必须在 {min_val}～{max_val} 范围内')
+    return value
 
 
 XHS_ID_PATTERN = r'^[0-9a-fA-F]{24}$'
@@ -145,8 +162,8 @@ class SearchNotesRequest(XhsRequest):
     model_config = ConfigDict(json_schema_extra={'examples': [{'keyword': '猫', 'page': 1}]})
     keyword: str = Field(min_length=1, max_length=200,
                          description='搜索关键词，去除首尾空白后为 1～200 个字符；同一次搜索翻页保持不变。', examples=['猫'])
-    page: int = Field(default=1, ge=1, le=1000, strict=True,
-                      description='搜索页码，整数 1～1000，首次为 1；后续使用 data.next_page。每页请求 20 条，实际数量由上游决定。page>1 时必须续传两个搜索 ID。', examples=[1])
+    page: int | str = Field(default=1,
+                            description='搜索页码，支持整数或数字字符串，范围 1～1000，首次为 1；后续使用 data.next_page。每页请求 20 条，实际数量由上游决定。page>1 时必须续传两个搜索 ID。', examples=[1])
     search_id: str | None = Field(default=None, min_length=1, max_length=200,
                                   description='同一次搜索的标识；首页省略时自动生成并在 data.search_id 返回，后续页必须原样续传，并保持关键词、排序和筛选一致。', examples=['替换为上一页data.search_id'])
     search_session_id: str | None = Field(default=None, min_length=1, max_length=200,
@@ -164,6 +181,12 @@ class SearchNotesRequest(XhsRequest):
     geo: str = Field(default='', max_length=1000,
                      description='上游地理位置参数字符串，默认空字符串；按位置筛选时传入上游认可的定位值。服务按原值转发，不解析或校验经纬度格式。', examples=[''])
 
+    @field_validator('page', mode='before')
+    @classmethod
+    def validate_page(cls, value):
+        # 兼容整数与数字字符串，并转换为 1～1000 范围内的整数
+        return parse_positive_int(value, 1, 1000, '搜索页码')
+
     @model_validator(mode='after')
     def validate_context(self):
         if self.page > 1 and (not self.search_id or not self.search_session_id):
@@ -180,6 +203,20 @@ class XhsAccountRequest(XhsRequest):
     def validate_account(self):
         validate_account_id(self.account_id)
         return self
+
+
+class CookieImportRequest(XhsAccountRequest):
+    """扩展手动导入当前浏览器的完整登录 Cookie。"""
+    cookie: str = Field(min_length=1, max_length=32768, repr=False,
+                        description='完整小红书 Cookie，必须包含 a1 和 web_session；不会在响应中返回。', examples=['a1=替换为设备标识; web_session=替换为真实会话'])
+
+    @field_validator('cookie')
+    @classmethod
+    def validate_cookie(cls, value):
+        cookies = parse_browser_cookie(value)
+        if not cookies.get('a1') or not cookies.get('web_session'):
+            raise ValueError('Cookie 缺少 a1 或 web_session')
+        return value
 
 
 class SmsSessionRequest(XhsAccountRequest):

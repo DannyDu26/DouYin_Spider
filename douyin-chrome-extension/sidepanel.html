@@ -33,6 +33,19 @@
         <button id="open-platform" class="secondary-button" type="button" hidden>打开平台</button>
       </section>
 
+      <details id="cookie-sync" class="cookie-sync">
+        <summary>同步<span data-sync-platform-name>抖音</span>登录到服务端 <span id="cookie-sync-version" class="field-hint"></span></summary>
+        <p class="field-hint">点击同步将当前<span data-sync-platform-name>抖音</span>登录 Cookie 发送到 <span id="cookie-sync-server"></span>，验证后保存到对应平台账号池。</p>
+        <form id="cookie-sync-form" class="cookie-sync-form">
+          <!-- 连字符放在字符类外，避免不同正则模式的转义差异。 -->
+          <label class="field"><span>账号别名</span><input name="accountId" required pattern="(?:[a-z0-9_]|-){1,64}" maxlength="64" placeholder="douyin_01" autocomplete="off"></label>
+          <label class="field"><span>同步密钥</span><input name="token" type="password" required autocomplete="off" placeholder="服务端配置的同步密钥"></label>
+          <p class="field-hint">仅保存账号别名；密钥只在本次侧边栏中使用。重复别名会更新已有凭证。</p>
+          <button id="cookie-sync-button" class="secondary-button" type="submit">同步当前登录</button>
+          <p id="cookie-sync-status" class="field-hint" role="status" aria-live="polite"></p>
+        </form>
+      </details>
+
       <nav class="mode-tabs" aria-label="抓取功能">
         <button class="mode-tab is-active" type="button" data-platform="douyin" data-mode="search">搜索</button>
         <button class="mode-tab" type="button" data-platform="douyin" data-mode="user">用户作品</button>

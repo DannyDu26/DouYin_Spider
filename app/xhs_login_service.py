@@ -14,7 +14,9 @@ import qrcode
 from app.account_pool import _positive_int_from_env
 from app.account_store import CredentialStoreError
 from xhs_apis.errors import XhsApiError, XhsRiskControlError
+from xhs_apis.request_policy import retry_after_seconds
 from xhs_apis.xhs_pc_login_apis import XHSLoginApi
+from xhs_apis.xhs_pc_apis import XHS_Apis
 from xhs_utils.xhs_pc import XHSPcAuth
 
 
@@ -32,7 +34,7 @@ class LoginHttpGuard:
     def request(self, method, url, **kwargs):
         response = self.client.request(method, url, **kwargs)
         if response.status_code in {429, 461, 471}:
-            raise XhsRiskControlError(f'http_{response.status_code}')
+            raise XhsRiskControlError(f'http_{response.status_code}', retry_after_seconds(response))
         return response
 
     def get(self, url, **kwargs):
@@ -72,7 +74,8 @@ class XhsLoginService:
         self.store = credential_store
         self.pool = account_pool
         self.login_factory = login_factory
-        self.timeout = _positive_int_from_env('XHS_SMS_SESSION_TIMEOUT_SECONDS', 300)
+        # 短信会话至少保留五分钟，避免旧部署的短超时配置提前作废验证码。
+        self.timeout = max(300, _positive_int_from_env('XHS_SMS_SESSION_TIMEOUT_SECONDS', 300))
         self.retention = _positive_int_from_env('XHS_SMS_SESSION_RETENTION_SECONDS', 300)
         self.send_interval = _positive_int_from_env('XHS_SMS_RESEND_INTERVAL_SECONDS', 60)
         self.max_sessions = _positive_int_from_env('XHS_SMS_MAX_SESSIONS', 10)
@@ -190,7 +193,7 @@ class XhsLoginService:
             session.error_details = error.details if isinstance(error, XhsApiError) else None
             if session.error_status == 410:
                 await self._finish(session, 'expired')
-            elif isinstance(error, XhsRiskControlError):
+            elif isinstance(error, XhsRiskControlError) and session.kind != 'cookie':
                 session.status = 'verification_required'
             elif session.error_code == 'XHS_SMS_INVALID_CODE' and session.failed_attempts < self.max_attempts:
                 session.status = 'waiting_sms_code'
@@ -234,6 +237,18 @@ class XhsLoginService:
                                         login_source='qrcode' if session.kind == 'qr' else 'phone')
         auth.login_verified = True
         return auth
+
+    async def import_cookie(self, payload):
+        """验证浏览器 Cookie 后复用统一持久化、入池和失败清理流程。"""
+        session = await self._reserve_session(payload.account_id, kind='cookie')
+
+        def authenticate():
+            session.login = XHSPcAuth.from_saved_state(payload.cookie)
+            XHS_Apis(session.login).bootstrap()
+            return session.login
+
+        self._launch(session, 'starting', authenticate, 'succeeded')
+        return await self._wait_for_step(session.session_id, 'succeeded')
 
     async def create_session(self, payload):
         session = await self._reserve_session(payload.account_id, payload.phone, payload.zone)

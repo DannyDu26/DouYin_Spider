@@ -1010,12 +1010,19 @@ class DouyinAPI:
             'GET',
             url,
             params=params.get(),
-            verify=False,
+            verify=get_douyin_tls_verify(),
             headers=headers.get(),
             cookies=auth.cookie,
+            timeout=get_douyin_http_timeout(),
         )
-        resp_json = json.loads(resp.text)
-        return int(resp_json['user_uid'])
+        # 先分类登录和安全验证错误，禁止把访客或失败响应作为有效账号。
+        resp_json = parse_douyin_response(resp)
+        if not isinstance(resp_json, dict) or resp_json.get('status_code', 0) not in (0, '0'):
+            raise DouyinRequestRejectedError('当前用户接口返回异常')
+        uid = resp_json.get('user_uid')
+        if isinstance(uid, bool) or not str(uid).isdigit() or int(uid) <= 0:
+            raise DouyinAuthenticationError('当前用户接口未返回正式用户')
+        return int(uid)
 
     @staticmethod
     def get_my_sec_uid(auth, **kwargs) -> str:

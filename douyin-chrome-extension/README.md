@@ -1,9 +1,9 @@
 # 短视频数据助手 Chrome 插件
 
-这是一个独立运行的 Manifest V3 插件，不需要启动本仓库的 FastAPI 服务，也不使用数据库。
+这是一个 Manifest V3 插件。浏览器采集功能可独立运行；可选的登录同步功能需要本仓库的 FastAPI 服务及数据库。
 插件使用当前 Chrome 配置文件中的平台登录状态。抖音和小红书请求都在当前平台标签页的
 MAIN world 中发起，直接携带浏览器 Cookie；小红书的 MNS/X-S-Common 签名在扩展本地生成，
-不上传 Cookie 或登录凭证。
+采集功能在浏览器内使用 Cookie；另提供可选的手动同步登录功能，将所选平台的抖音或小红书 Cookie 上传到固定服务端 `https://crawler.xoyo.com/`。
 
 ## 功能
 
@@ -16,6 +16,7 @@ MAIN world 中发起，直接携带浏览器 Cookie；小红书的 MNS/X-S-Commo
 - 小红书笔记搜索、笔记详情、用户笔记和一级评论（可包含回复）。
 - 小红书请求复用当前页面签名器，并提供本地 MNS/X-S-Common 生成回退。
 - 用户输入参数保存在扩展本地存储中，Cookie 不会写入扩展存储。
+- 手动将当前浏览器配置的抖音或小红书登录同步到服务端对应账号池，验证后保存；支持更新已有账号。
 
 ## 安装
 
@@ -37,6 +38,17 @@ MAIN world 中发起，直接携带浏览器 Cookie；小红书的 MNS/X-S-Commo
 
 选择“小红书”后，搜索、笔记详情、用户笔记和评论使用当前小红书标签页的 Cookie 直接请求。
 笔记链接需要携带页面或搜索结果中的 `xsec_token`；用户笔记支持主页链接或 24 位用户 ID。
+
+## 同步抖音或小红书登录
+
+服务端在对应 `.env.dev` 或 `.env.prod` 配置随机长密钥：抖音使用 `DOUYIN_COOKIE_IMPORT_TOKEN`，小红书使用 `XHS_COOKIE_IMPORT_TOKEN`。启用对应平台服务及数据库后重启；密钥留空时关闭该平台的导入入口。
+重新加载扩展，在对应平台的已登录标签页打开侧边栏，选择“抖音”或“小红书”，展开登录同步表单，填写账号别名和该平台的同步密钥，点击“同步当前登录”。首次使用会申请 `https://crawler.xoyo.com/` 的网站访问权限。
+
+服务地址固定为 `https://crawler.xoyo.com/`，接口分别为 `/api/v1/douyin/auth/cookie/import` 和 `/api/v1/xhs/auth/cookie/import`，不提供地址输入框，也不使用历史保存的地址。
+相同账号别名更新最新凭证；服务端验证失败不会覆盖旧凭证。仅账号别名保存在本地，Cookie 与密钥不写入扩展存储，不自动监听上传。
+Cookie 从当前标签页的 Cookie Store 读取，不会回退到其他配置；抖音和小红书的账号别名分别保存，切换平台清空密钥。抖音缺少 `s_v_web_id` 时复用页面或采集客户端的备用指纹；登录会话仍必须真实存在，并由服务端验证。
+
+接口、部署和验证限制见 [浏览器 Cookie 同步说明](../docs/浏览器Cookie同步.md)。
 
 ## 隐私政策与商店提交
 
@@ -62,6 +74,7 @@ MAIN world 中发起，直接携带浏览器 Cookie；小红书的 MNS/X-S-Commo
 | `https://*.douyin.com/*` | 仅允许操作目标平台域名 |
 | `https://xiaohongshu.com/*`、`https://*.xiaohongshu.com/*` | 在已登录的小红书页面中发起同源请求 |
 | `https://mssdk.bytedance.com/*` | 换取用户作品查询使用的动态 `msToken` |
+| `https://crawler.xoyo.com/*`（可选） | 仅在手动同步时申请固定服务站点权限，上传所选平台的 Cookie |
 
 ## 实现说明
 
@@ -92,6 +105,7 @@ MAIN world 中发起，直接携带浏览器 Cookie；小红书的 MNS/X-S-Commo
 node douyin-chrome-extension/tests/extension-tests.mjs
 node douyin-chrome-extension/tests/xhs-extension-tests.mjs
 node douyin-chrome-extension/tests/service-worker-tests.mjs
+node douyin-chrome-extension/tests/cookie-sync-tests.mjs
 node --check douyin-chrome-extension/lib/mstoken.js
 node --check douyin-chrome-extension/sidepanel.js
 node --check douyin-chrome-extension/service-worker.js

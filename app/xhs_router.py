@@ -1,22 +1,30 @@
 """小红书路由，复用应用统一响应封装。"""
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Header, Request
+
+from app.browser_cookie_import import require_import_token
 
 from app.api_docs import XHS_DATA_TAG, XHS_LOGIN_TAG, sms_response_docs, append_parameter_docs
 from app.xhs_schemas import (
     NoteRequest, SearchNotesRequest, UserRequest, UserNotesRequest,
     NoteCommentsRequest, NoteSubCommentsRequest, SmsSessionRequest, SmsLoginRequest,
-    QrSessionRequest, QrLoginRequest,
+    QrSessionRequest, QrLoginRequest, CookieImportRequest,
 )
 from xhs_apis.errors import XhsApiError
+
+
+def require_cookie_import_token(x_xhs_import_token: str = Header(default='', description='浏览器 Cookie 导入的独立同步密钥')):
+    """导入凭证使用独立密钥，未配置时关闭入口。"""
+    require_import_token(x_xhs_import_token, 'XHS', XhsApiError)
 
 
 def create_xhs_router(response):
     # 每个接口只指定一个分组，避免父子 tags 叠加造成重复展示。
     router = APIRouter(prefix='/api/v1/xhs', responses={
+        401: {'description': '小红书账号登录已过期，请重新登录（XHS_AUTH_EXPIRED）。'},
         422: {'description': '参数、链接或验证码校验失败。'},
         429: {'description': '发送过于频繁或小红书上游要求安全验证。'},
         502: {'description': '小红书上游请求或响应异常。'},
-        503: {'description': '小红书服务未启用或没有可用账号。'},
+        503: {'description': '服务未启用、账号不可用、排队超时或上游暂时不可用；按 error.code、details.reason 和 Retry-After 处理。'},
     })
 
     def service(request, name='xhs_service'):
@@ -78,6 +86,13 @@ def create_xhs_router(response):
                  description='提交二维码接口返回的 session_id。服务端等待扫码和手机确认，验证正式用户并保存凭证、加入账号池后返回 succeeded；无需轮询，客户端需设置足够的超时。')
     async def login_qrcode(payload: QrLoginRequest, request: Request):
         return response(request, await service(request, 'xhs_login_service').login_qrcode(payload.session_id))
+
+    @router.post('/auth/cookie/import', tags=[XHS_LOGIN_TAG], summary='导入浏览器登录 Cookie',
+                 dependencies=[Depends(require_cookie_import_token)],
+                 responses={401: {'description': '同步密钥无效，或小红书会话已过期。'}},
+                 description='扩展手动上传 Cookie；请求头 X-XHS-Import-Token 必须匹配服务端 XHS_COOKIE_IMPORT_TOKEN。验证正式用户后保存并加入账号池，重复 account_id 更新已有凭证；未配置密钥时禁用。响应不包含 Cookie。')
+    async def import_cookie(payload: CookieImportRequest, request: Request):
+        return response(request, await service(request, 'xhs_login_service').import_cookie(payload))
 
     @router.get('/auth/accounts', tags=[XHS_LOGIN_TAG], summary='查看账号池')
     def accounts(request: Request):

@@ -147,10 +147,88 @@ def test_risk_control_cools_only_selected_account(client):
     assert client[1].account_pool.stats()['cooling'] == 1
 
 
+def test_risk_control_obeys_longer_retry_after_and_returns_cooldown(client):
+    FakeClient.failure = XhsRiskControlError('http_429', 2000)
+    payload = {'note_id': NOTE_ID, 'xsec_token': 't'}
+    first = client[0].post('/api/v1/xhs/note_info', json=payload)
+    assert first.status_code == 429 and first.headers['retry-after'] == '2000'
+    assert first.json()['error']['details']['reason'] == 'account_risk_control'
+    second = client[0].post('/api/v1/xhs/note_info', json=payload)
+    assert second.status_code == 503
+    assert int(second.headers['retry-after']) >= 1999
+    assert second.json()['error']['details']['reason'] == 'accounts_cooling'
+    assert len(FakeClient.calls) == 1
+
+
+def test_queue_timeout_is_distinct_and_does_not_leak_slot(client):
+    service = client[1]
+    service.request_policy.acquire_timeout = 0.01
+    # 耗尽入口槽位，不依赖实际网络和长时间等待。
+    for _ in range(service.max_concurrent):
+        assert service._semaphore.acquire(blocking=False)
+    payload = {'note_id': NOTE_ID, 'xsec_token': 't'}
+    try:
+        result = client[0].post('/api/v1/xhs/note_info', json=payload)
+        assert result.status_code == 503
+        assert result.json()['error']['code'] == 'XHS_REQUEST_QUEUE_FULL'
+        assert result.headers['retry-after'] == '1'
+        assert not FakeClient.calls
+    finally:
+        for _ in range(service.max_concurrent):
+            service._semaphore.release()
+    assert client[0].post('/api/v1/xhs/note_info', json=payload).status_code == 200
+
+
+def test_empty_account_pool_is_not_retryable_cooldown(client):
+    client[1].account_pool.remove_account('xhs_one')
+    result = client[0].post('/api/v1/xhs/note_info', json={'note_id': NOTE_ID, 'xsec_token': 't'})
+    assert result.status_code == 503
+    assert result.json()['error']['details']['reason'] == 'no_valid_accounts'
+    assert 'retry-after' not in result.headers
+
+
 def test_business_error_does_not_cool_account(client):
     FakeClient.failure = XhsApiError('XHS_NOTE_UNAVAILABLE', '笔记不可用')
     assert client[0].post('/api/v1/xhs/note_info', json={'note_id': NOTE_ID, 'xsec_token': 't'}).status_code == 502
     assert client[1].account_pool.stats()['available'] == 1
+
+
+@pytest.mark.parametrize('during_bootstrap', [False, True])
+@pytest.mark.parametrize('account_count', [1, 2])
+def test_expired_cookie_keeps_auth_error_after_failover(client, monkeypatch, during_bootstrap, account_count):
+    # 覆盖首次校验与业务请求过期，以及备用账号同样失效的情况。
+    pool = client[1].account_pool
+    if account_count == 2:
+        pool.upsert(CredentialRecord(2, 'xhs_two', None, make_auth('two')))
+    auths = [state.record.auth for state in pool._accounts.values()]
+    if during_bootstrap:
+        for state in pool._accounts.values():
+            state.record.auth.login_verified = False
+        def expired_bootstrap(self):
+            raise XhsAuthenticationError()
+        monkeypatch.setattr(FakeClient, 'bootstrap', expired_bootstrap)
+    else:
+        FakeClient.failure = XhsAuthenticationError()
+
+    response = client[0].post('/api/v1/xhs/note_info', json={'note_id': NOTE_ID, 'xsec_token': 't'})
+
+    assert response.status_code == 401
+    body = response.json()
+    assert not body['success']
+    assert body['error']['code'] == 'XHS_AUTH_EXPIRED'
+    assert '过期' in body['error']['message'] and '重新登录' in body['error']['message']
+    assert body['request_id'] == response.headers['x-request-id']
+    assert pool.stats()['total'] == 0
+    assert all(not auth.login_verified for auth in auths)
+    assert client[0].get('/api/v1/xhs/auth/accounts').json()['data']['items'] == []
+
+
+def test_no_available_account_without_auth_failure_keeps_pool_error(client):
+    # 单纯冷却不应误报为 Cookie 过期。
+    client[1].account_pool.mark_risk_control('xhs_one')
+    response = client[0].post('/api/v1/xhs/note_info', json={'note_id': NOTE_ID, 'xsec_token': 't'})
+    assert response.status_code == 503
+    assert response.json()['error']['code'] == 'XHS_NO_AVAILABLE_ACCOUNT'
 
 
 def test_auth_failover_uses_other_account():
@@ -166,6 +244,7 @@ def test_auth_failover_uses_other_account():
     from app.xhs_schemas import UserRequest
     result = service.user_info(UserRequest(user_id=USER_ID), 'request')
     assert result['account_id'] == 'two' and result['failover_count'] == 1
+    assert [item['account_id'] for item in pool.list_accounts()] == ['two']
     service.close()
 
 
@@ -196,8 +275,45 @@ def test_signed_transport_keeps_body_and_cookie_domains():
 
 
 def test_search_page_two_requires_context():
+    # 翻页时未传上下文抛出异常
     with pytest.raises(ValueError):
         SearchNotesRequest(keyword='猫', page=2)
+    with pytest.raises(ValueError):
+        SearchNotesRequest(keyword='猫', page='2')
+
+
+@pytest.mark.parametrize('valid_page,expected', [
+    (1, 1),
+    ('1', 1),
+    (' 1 ', 1),
+    ('2', 2),
+    (2, 2),
+])
+def test_search_page_accepts_string_and_int(valid_page, expected):
+    # 支持整型与数字字符串 page，并统一规范化为整数
+    req = SearchNotesRequest(keyword='猫', page=valid_page, search_id='s', search_session_id='ss')
+    assert req.page == expected
+    assert isinstance(req.page, int)
+
+
+@pytest.mark.parametrize('invalid_page', ['0', 0, '1001', 1001, 'abc', '1.5', 1.5, True, False, '', '-1'])
+def test_search_page_rejects_invalid_values(invalid_page):
+    # 非法或超出 1～1000 范围的 page 应校验失败
+    with pytest.raises(ValueError):
+        SearchNotesRequest(keyword='猫', page=invalid_page)
+
+
+def test_search_api_accepts_string_page(client):
+    # API 接口传入字符串类型的 page
+    response = client[0].post('/api/v1/xhs/search_notes', json={'keyword': '猫', 'page': '1'})
+    assert response.status_code == 200
+    body = response.json()
+    assert body['data']['page'] == 1
+    assert body['data']['next_page'] == 2
+
+    # API 接口传入非法 page 触发 422 参数错误
+    bad_res = client[0].post('/api/v1/xhs/search_notes', json={'keyword': '猫', 'page': 'invalid'})
+    assert bad_res.status_code == 422
 
 
 def test_runtime_refresh_keeps_formal_session(monkeypatch):

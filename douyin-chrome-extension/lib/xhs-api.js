@@ -1,4 +1,4 @@
-// 小红书浏览器直连客户端：请求在当前登录页面上下文中发起，Cookie 不离开浏览器。
+// 小红书浏览器直连客户端：采集请求在当前登录页面上下文中发起。
 
 export class XhsRequestError extends Error {
   constructor(message, code = "XHS_REQUEST_FAILED", details = null, status = 0) {

@@ -11,8 +11,14 @@ import {
 import { DouyinClient, DouyinRequestError } from "./lib/douyin-api.js";
 import { buildMsTokenReportBody } from "./lib/mstoken.js";
 import { XhsBrowserClient, XhsRequestError, inspectXhsLoginCookies, parseXhsPage } from "./lib/xhs-api.js";
+import { COOKIE_SYNC_SERVER_URL, syncBrowserCookie } from "./lib/cookie-sync.js";
+import { readXhsPageCookies } from "./lib/xhs-cookies.js";
 
 const elements = {
+  cookieSync: document.querySelector("#cookie-sync"),
+  cookieSyncForm: document.querySelector("#cookie-sync-form"),
+  cookieSyncButton: document.querySelector("#cookie-sync-button"),
+  cookieSyncStatus: document.querySelector("#cookie-sync-status"),
   pageSummary: document.querySelector("#page-summary"),
   refreshContext: document.querySelector("#refresh-context"),
   platformSelect: document.querySelector("#platform-select"),
@@ -37,7 +43,13 @@ const elements = {
   commentsVideoId: document.querySelector("#comments-video-id"),
 };
 
+document.querySelector("#cookie-sync-server").textContent = `${COOKIE_SYNC_SERVER_URL}/`;
+// 显示实际加载版本，便于区分旧侧边栏或其他目录中的扩展。
+document.querySelector("#cookie-sync-version").textContent = `v${chrome.runtime.getManifest().version}`;
+
 const state = {
+  cookieSyncAccounts: {},
+  syncFormPlatform: null,
   platform: "douyin",
   mode: "search",
   tab: null,
@@ -77,6 +89,16 @@ function storeCurrentResult(result) {
 }
 
 function setMode(mode) {
+  if (state.syncFormPlatform !== state.platform) {
+    // 切换平台时隔离别名并清空密钥，避免将另一平台的密钥误发。
+    const name = state.platform === "xhs" ? "小红书" : "抖音";
+    document.querySelectorAll("[data-sync-platform-name]").forEach((node) => { node.textContent = name; });
+    elements.cookieSyncForm.elements.namedItem("accountId").value = state.cookieSyncAccounts[state.platform]?.accountId || "";
+    elements.cookieSyncForm.elements.namedItem("accountId").placeholder = state.platform === "xhs" ? "xhs_01" : "douyin_01";
+    elements.cookieSyncForm.elements.namedItem("token").value = "";
+    elements.cookieSyncStatus.textContent = "";
+    state.syncFormPlatform = state.platform;
+  }
   const nextMode = mode === "replies" ? "comments" : mode;
   if (nextMode !== state.mode) {
     // 每个功能 Tab 使用独立结果缓存，切换时只显示当前 Tab 的结果。
@@ -235,35 +257,6 @@ async function readXhsCookies(tabId) {
     ...exactResults.filter((result) => result.status === "fulfilled").map((result) => result.value),
     pageCookies,
   ]);
-}
-
-async function readXhsPageCookies(tabId) {
-  try {
-    const [{ result }] = await chrome.scripting.executeScript({
-      target: { tabId },
-      world: "MAIN",
-      func: () => {
-        const cookies = document.cookie.split(";").map((part) => {
-        const separator = part.indexOf("=");
-        if (separator < 1) return null;
-        const name = part.slice(0, separator).trim();
-        const rawValue = part.slice(separator + 1).trim();
-        try {
-          return { name, value: decodeURIComponent(rawValue), domain: location.hostname, path: "/" };
-        } catch {
-          return { name, value: rawValue, domain: location.hostname, path: "/" };
-        }
-        }).filter(Boolean);
-        // _dsl 不是 Cookie，但页面签名器会从这里读取 X-S-Common 的时间锚点。
-        if (window._dsl) cookies.push({ name: "_dsl", value: String(window._dsl), domain: location.hostname, path: "/" });
-        return cookies;
-      },
-    });
-    return Array.isArray(result) ? result : [];
-  } catch {
-    // 受限页面无法执行脚本时，仍使用 cookies API 的结果。
-    return [];
-  }
 }
 
 async function inspectXhsPageAuthentication(tabId) {
@@ -1063,7 +1056,15 @@ async function saveFormState() {
 }
 
 async function restoreFormState() {
-  const saved = await chrome.storage.local.get(["forms", "mode", "platform"]);
+  const saved = await chrome.storage.local.get(["forms", "mode", "platform", "cookieSyncConfig"]);
+  state.cookieSyncAccounts = {
+    xhs: { accountId: saved.cookieSyncConfig?.xhs?.accountId || saved.cookieSyncConfig?.accountId || "" },
+    douyin: { accountId: saved.cookieSyncConfig?.douyin?.accountId || "" },
+  };
+  // 旧版单平台别名迁移到小红书，并清除历史可配置地址。
+  if (saved.cookieSyncConfig?.accountId !== undefined || saved.cookieSyncConfig?.serverUrl !== undefined) {
+    await chrome.storage.local.set({ cookieSyncConfig: state.cookieSyncAccounts });
+  }
   Object.entries(saved.forms || {}).forEach(([key, values]) => {
     const [platform, mode] = key.includes(":") ? key.split(":", 2) : ["douyin", key];
     const form = elements.forms.find((item) => (item.dataset.platform || "douyin") === platform && item.dataset.form === mode);
@@ -1103,6 +1104,28 @@ elements.openPlatform.addEventListener("click", async () => {
   }
 });
 elements.runButton.addEventListener("click", runCrawler);
+
+elements.cookieSyncForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (elements.cookieSyncButton.disabled) return;
+  const config = Object.fromEntries(new FormData(elements.cookieSyncForm));
+  const platform = state.platform;
+  elements.cookieSyncButton.disabled = true;
+  elements.platformSelect.disabled = true;
+  elements.cookieSyncStatus.textContent = "正在读取当前登录并等待服务端验证…";
+  try {
+    const result = await syncBrowserCookie({ ...config, platform, tabId: state.tab?.id, fingerprint: state.profile?.fingerprint || "" });
+    // 只保存非敏感设置，Cookie 和同步密钥均不落扩展存储。
+    state.cookieSyncAccounts[platform] = { accountId: result.accountId };
+    await chrome.storage.local.set({ cookieSyncConfig: state.cookieSyncAccounts });
+    elements.cookieSyncStatus.textContent = `账号 ${result.accountId} 已验证并保存到 ${result.baseUrl}`;
+  } catch (error) {
+    elements.cookieSyncStatus.textContent = error.message;
+  } finally {
+    elements.cookieSyncButton.disabled = false;
+    elements.platformSelect.disabled = state.running;
+  }
+});
 elements.stopButton.addEventListener("click", () => {
   state.cancelRequested = true;
   setTaskStatus("正在停止，当前请求完成后结束");

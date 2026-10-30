@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "短视频数据助手",
-  "version": "0.2.9",
+  "version": "0.3.2",
   "minimum_chrome_version": "116",
   "description": "在浏览器侧边栏采集抖音与小红书笔记、用户和评论数据。",
   "permissions": [
@@ -19,6 +19,9 @@
     "https://mssdk.bytedance.com/*",
     "https://xiaohongshu.com/*",
     "https://*.xiaohongshu.com/*"
+  ],
+  "optional_host_permissions": [
+    "https://crawler.xoyo.com/*"
   ],
   "background": {
     "service_worker": "service-worker.js"

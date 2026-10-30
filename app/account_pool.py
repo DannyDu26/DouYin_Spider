@@ -216,6 +216,7 @@ class AccountPool:
                     removed_credential_id = self._removed_credentials.get(record.account_id)
                     if removed_credential_id is not None:
                         if record.row_id <= removed_credential_id:
+                            self._retire_auth(record.auth)
                             continue
                         # 更高版本凭证视为重新登录成功，可以恢复账号。
                         self._removed_credentials.pop(record.account_id, None)
@@ -386,13 +387,44 @@ class AccountPool:
             state.record = record
             return True
 
+    def _remove_record(self, record: CredentialRecord) -> None:
+        """持锁移除当前凭证，阻止旧版本回池并延迟关闭活跃连接。"""
+        self._removed_credentials[record.account_id] = record.row_id
+        del self._accounts[record.account_id]
+        self._cursor = self._cursor % len(self._accounts) if self._accounts else 0
+        self._retire_auth(record.auth)
+        self._condition.notify_all()
+
+    def remove_account(
+        self,
+        account_id: str,
+        credential_id: int | None = None,
+        credential_auth: Any = None,
+    ) -> bool:
+        """立即从内存池移除指定凭证，不误删并发重新登录的新认证。"""
+        with self._condition:
+            state = self._accounts.get(account_id)
+            if state is None:
+                return False
+            if credential_id is not None and state.record.row_id != credential_id:
+                return False
+            if credential_auth is not None and state.record.auth is not credential_auth:
+                return False
+            self._remove_record(state.record)
+            return True
+
     def mark_auth_failure(
         self,
         account_id: str,
         credential_id: int | None = None,
         credential_auth: Any = None,
+        cooldown_seconds: float | None = None,
     ) -> datetime | None:
         """仅冷却发生失败的凭证版本，避免误伤刚刷新的账号。"""
+        # 小红书可按上游 Retry-After 延长冷却，其他调用保持原配置。
+        duration = self.cooldown_seconds if cooldown_seconds is None else cooldown_seconds
+        if not math.isfinite(duration) or duration < 0:
+            raise ValueError('cooldown_seconds 必须是有限非负数')
         removed_record = None
         with self._condition:
             state = self._accounts.get(account_id)
@@ -412,7 +444,7 @@ class AccountPool:
             if credential_auth is not None and state.record.auth is not credential_auth:
                 return None
             state.failure_count += 1
-            state.cooldown_until = self._clock() + self.cooldown_seconds
+            state.cooldown_until = max(state.cooldown_until or 0, self._clock() + duration)
             cooldown_until = state.cooldown_until
             if (
                     self.cooldown_failure_limit > 0
@@ -420,12 +452,7 @@ class AccountPool:
             ):
                 # 只移除当前凭证版本；更高版本凭证仍可重新入池。
                 removed_record = state.record
-                self._removed_credentials[account_id] = state.record.row_id
-                del self._accounts[account_id]
-                if self._accounts:
-                    self._cursor %= len(self._accounts)
-                else:
-                    self._cursor = 0
+                self._remove_record(removed_record)
             self._condition.notify_all()
         if removed_record is not None and self._credential_remover is not None:
             try:
@@ -451,9 +478,10 @@ class AccountPool:
         account_id: str,
         credential_id: int | None = None,
         credential_auth: Any = None,
+        cooldown_seconds: float | None = None,
     ) -> datetime | None:
         """风控只冷却实际使用的账号，沿用统一冷却窗口。"""
-        return self.mark_auth_failure(account_id, credential_id, credential_auth)
+        return self.mark_auth_failure(account_id, credential_id, credential_auth, cooldown_seconds)
 
     def retry_after_seconds(self) -> int | None:
         """返回任一冷却账号最早恢复所需秒数。"""

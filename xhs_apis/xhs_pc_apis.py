@@ -2,6 +2,7 @@
 from urllib.parse import parse_qs, urlparse
 
 from xhs_apis.errors import XhsApiError, XhsAuthenticationError, XhsRiskControlError
+from xhs_apis.request_policy import XhsRequestPolicy, retry_after_seconds
 from xhs_utils.http_util import REQUEST_TIMEOUT
 from xhs_utils.xhs_pc import XHSPcAuth
 from xhs_utils.xhs_pc.params import (
@@ -11,11 +12,12 @@ from xhs_utils.xhs_pc.params import (
 
 
 class XHS_Apis:
-    def __init__(self, auth: XHSPcAuth):
+    def __init__(self, auth: XHSPcAuth, request_policy=None):
         self.auth = auth
         self.http = auth.http_client
         self.base_url = auth.origin('api')
         self.so_base_url = auth.origin('search')
+        self.request_policy = request_policy if request_policy is not None else XhsRequestPolicy.from_env()
 
     def bootstrap(self):
         """只接受正式登录用户，禁止将访客加入业务账号池。"""
@@ -31,8 +33,6 @@ class XHS_Apis:
         self.auth.validate()
         path = api.split('?', 1)[0]
         with_xy = path == '/api/sns/web/v1/feed'
-        if with_xy and not self.auth.user_id:
-            self.bootstrap()
         context = self.auth.next_sign_context(api)
         headers, cookies, body = generate_request_params(
             self.auth.cookies, api, data, method, user_id=self.auth.user_id,
@@ -63,7 +63,7 @@ class XHS_Apis:
         if status == 401:
             raise XhsAuthenticationError()
         if status in {429, 461, 471}:
-            raise XhsRiskControlError(f'http_{status}')
+            raise XhsRiskControlError(f'http_{status}', retry_after_seconds(response))
         if status >= 400:
             raise XhsApiError('XHS_UPSTREAM_ERROR', '小红书上游请求失败', details={'http_status': status})
         try:
@@ -87,12 +87,21 @@ class XHS_Apis:
     def _request(self, api, data='', method='GET', origin=None):
         target = origin or self.base_url
         try:
-            headers, cookies, body = self._request_params(api, data, method, target)
-            kwargs = dict(headers=headers, cookies=cookies, proxies=self.auth.proxies, timeout=REQUEST_TIMEOUT)
-            if method != 'GET':
-                kwargs['data'] = body.encode('utf-8') if isinstance(body, str) else body
-            response = self.http.request(method, target + api, **kwargs)
-            self.auth.merge_response_cookies(response)
+            # 登录校验独立经过节流，避免在签名锁内递归请求。
+            if api.split('?', 1)[0] == '/api/sns/web/v1/feed' and not self.auth.user_id:
+                self.bootstrap()
+
+            def send():
+                headers, cookies, body = self._request_params(api, data, method, target)
+                kwargs = dict(headers=headers, cookies=cookies, proxies=self.auth.proxies, timeout=REQUEST_TIMEOUT)
+                if method != 'GET':
+                    kwargs['data'] = body.encode('utf-8') if isinstance(body, str) else body
+                response = self.http.request(method, target + api, **kwargs)
+                self.auth.merge_response_cookies(response)
+                return response
+
+            # 六项业务接口均为只读，503 可在有限次数内安全重试。
+            response = self.request_policy.execute(send)
             return self.decode_response(response)
         except XhsApiError:
             raise
@@ -123,6 +132,9 @@ class XHS_Apis:
 
     def search_note(self, keyword, page=1, search_id=None, search_session_id=None,
                     sort='general', note_type=0, note_time=0, note_range=0, pos_distance=0, geo=''):
+        # 兼容 string 类型的 page 参数并转换为整数
+        if isinstance(page, str) and page.strip().isdigit():
+            page = int(page.strip())
         # 同一次搜索的 ID 和会话标识由调用方在翻页时续传。
         data = {
             'keyword': keyword, 'page': page, 'page_size': 20,

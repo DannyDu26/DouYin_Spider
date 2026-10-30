@@ -8,7 +8,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import FastAPI, Path, Request
+from fastapi import Depends, FastAPI, Path, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from loguru import logger
@@ -39,6 +39,8 @@ from dy_apis.douyin_api import DouyinRiskControlError
 from app.xhs_router import create_xhs_router
 from app.xhs_service import create_xhs_service
 from app.xhs_login_service import XhsLoginService
+from app.browser_cookie_import import BrowserCookieImportError
+from app.douyin_cookie_import import DouyinCookieImportRequest, DouyinCookieImportService, require_douyin_import_token
 from xhs_apis.errors import XhsApiError
 
 
@@ -215,6 +217,9 @@ def create_app(
                 qr_service = QrLoginService(store, spider.account_pool)
                 app_instance.state.qr_login_service = qr_service
 
+            if store is not None:
+                app_instance.state.douyin_cookie_import_service = DouyinCookieImportService(store, spider.account_pool)
+
             # 注入测试服务时不自动创建真实数据库和上游客户端。
             enabled = os.getenv('XHS_ENABLED', 'true').strip().lower()
             if enabled not in {'true', 'false', '1', '0'}:
@@ -314,7 +319,12 @@ def create_app(
 
     @application.exception_handler(XhsApiError)
     async def xhs_error_handler(request: Request, error: XhsApiError):
-        return _error_response(request, error.code, error.message, error.status_code, error.details)
+        response = _error_response(request, error.code, error.message, error.status_code, error.details)
+        # 标准响应头与 JSON 等待时间保持一致，调用方可直接安排重试。
+        retry_after = (error.details or {}).get('retry_after_seconds')
+        if error.status_code in {429, 503} and isinstance(retry_after, int) and retry_after > 0:
+            response.headers['Retry-After'] = str(retry_after)
+        return response
 
     @application.middleware('http')
     async def request_context(request: Request, call_next):
@@ -334,6 +344,10 @@ def create_app(
             elapsed_ms,
         )
         return response
+
+    @application.exception_handler(BrowserCookieImportError)
+    async def browser_cookie_error_handler(request: Request, error: BrowserCookieImportError):
+        return _error_response(request, error.code, error.message, error.status_code)
 
     @application.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, error: RequestValidationError):
@@ -430,6 +444,15 @@ def create_app(
                 'accounts': xhs_stats,
             },
         }, status_code=status_code)
+
+    @application.post('/api/v1/douyin/auth/cookie/import', tags=[DOUYIN_LOGIN_TAG],
+                      summary='导入抖音浏览器登录 Cookie', dependencies=[Depends(require_douyin_import_token)],
+                      description='手动同步浏览器 Cookie；请求头 X-Douyin-Import-Token 匹配 DOUYIN_COOKIE_IMPORT_TOKEN。验证正式用户后保存并加入抖音账号池，同一 account_id 更新已有凭证。')
+    def import_douyin_cookie(payload: DouyinCookieImportRequest, request: Request):
+        importer = getattr(request.app.state, 'douyin_cookie_import_service', None)
+        if importer is None:
+            raise BrowserCookieImportError('DOUYIN_COOKIE_IMPORT_UNAVAILABLE', '抖音 Cookie 导入服务未启用', 503)
+        return _response(request, importer.import_cookie(payload))
 
     @application.get(
         '/api/v1/douyin/auth/accounts',

@@ -12,9 +12,13 @@ class XhsApiError(RuntimeError):
 
 class XhsAuthenticationError(XhsApiError):
     def __init__(self):
-        super().__init__('XHS_AUTH_EXPIRED', '小红书账号登录已失效', 503)
+        # 登录过期单独返回 401，便于调用方触发重新登录。
+        super().__init__('XHS_AUTH_EXPIRED', '小红书账号登录已过期，请重新登录', 401)
 
 
 class XhsRiskControlError(XhsApiError):
-    def __init__(self, signal: str):
-        super().__init__('XHS_RISK_CONTROL', '小红书上游要求安全验证或限制访问', 429, {'signal': signal})
+    def __init__(self, signal: str, retry_after_seconds: int | None = None):
+        details = {'signal': signal}
+        if retry_after_seconds is not None:
+            details['retry_after_seconds'] = retry_after_seconds
+        super().__init__('XHS_RISK_CONTROL', '小红书上游要求安全验证或限制访问', 429, details)

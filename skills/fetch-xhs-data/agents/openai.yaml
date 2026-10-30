@@ -1,0 +1,4 @@
+interface:
+  display_name: "fetch_xhs_data"
+  short_description: "通过项目小红书 HTTP API，完成扫码或短信登录并检查账号池状态"
+  default_prompt: "使用 $fetch-xhs-data 通过项目 HTTP API 完成小红书扫码登录，并检查账号池状态。"

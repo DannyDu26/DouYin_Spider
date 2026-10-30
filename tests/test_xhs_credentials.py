@@ -84,6 +84,62 @@ def test_old_client_closes_after_active_lease():
     store.close()
 
 
+def test_expired_account_removal_blocks_refresh_and_relogin_restores_pool(monkeypatch):
+    # 移除仅作用于内存池，旧连接在租约结束后关闭，重新登录可恢复同一数据库行。
+    store = make_store()
+    old = store.insert('one', make_auth('old'))
+    pool = AccountPool([old], manage_auth_resources=True, credential_remover=store.delete_credential)
+    closed = []
+    original_close = old.auth.close
+    def close_old():
+        closed.append('old')
+        original_close()
+    monkeypatch.setattr(old.auth, 'close', close_old)
+    try:
+        with pool.acquire() as lease:
+            assert pool.remove_account(lease.account_id, lease.row_id, lease.auth)
+            assert not pool.remove_account(lease.account_id, lease.row_id, lease.auth)
+            assert pool.list_accounts() == [] and not closed
+
+            restored = store.load_latest()
+            assert len(restored) == 1
+            stale_auth = restored[0].auth
+            stale_close = stale_auth.close
+            def close_stale():
+                closed.append('stale')
+                stale_close()
+            monkeypatch.setattr(stale_auth, 'close', close_stale)
+            assert pool.refresh(restored) == 0
+            assert closed == ['stale']
+        assert closed == ['stale', 'old']
+
+        new = store.insert('one', make_auth('new'))
+        assert new.row_id == old.row_id
+        pool.upsert(new)
+        with pool.acquire() as lease:
+            assert lease.auth is new.auth
+    finally:
+        pool.close()
+        store.close()
+
+
+@pytest.mark.parametrize('same_row', [False, True])
+def test_expired_old_lease_cannot_remove_new_login(same_row):
+    # 同一行的新登录态和新行凭证都不能被旧请求移除。
+    from app.account_store import CredentialRecord
+    old = CredentialRecord(1, 'one', None, make_auth('old'))
+    pool = AccountPool([old], manage_auth_resources=True)
+    try:
+        with pool.acquire() as lease:
+            new = CredentialRecord(1 if same_row else 2, 'one', None, make_auth('new'))
+            pool.upsert(new)
+            assert not pool.remove_account(lease.account_id, lease.row_id, lease.auth)
+        with pool.acquire() as lease:
+            assert lease.auth is new.auth
+    finally:
+        pool.close()
+
+
 def test_platform_records_do_not_mix():
     store = make_store()
     auth = make_auth()

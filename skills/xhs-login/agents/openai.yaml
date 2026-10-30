@@ -1,4 +1,0 @@
-interface:
-  display_name: "XHS QR Login"
-  short_description: "Run XHS PC QR login and save cookies"
-  default_prompt: "Run the XHS QR login flow for the current project and verify the session"

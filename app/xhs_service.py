@@ -1,5 +1,6 @@
 """小红书账号执行、分页转换和状态快照。"""
 import os
+import math
 import subprocess
 import threading
 import time
@@ -12,6 +13,7 @@ from app.account_store import CredentialStoreError, MySQLCredentialStore
 from app.xhs_credentials import XHS_CREDENTIAL_TYPE, XhsCredentialCodec
 from xhs_apis.errors import XhsApiError, XhsAuthenticationError, XhsRiskControlError
 from xhs_apis.xhs_pc_apis import XHS_Apis
+from xhs_apis.request_policy import XhsRequestPolicy
 from xhs_apis.xhs_pc_login_apis import XHSLoginApi
 from xhs_utils.xhs_pc.params import generate_search_id, generate_search_session_id
 from xhs_utils.xhs_pc.state import DS_REFRESH_INTERVAL_MS, now_ms
@@ -43,7 +45,7 @@ def create_xhs_service(douyin_store):
                                 XHS_CREDENTIAL_TYPE, codec=XhsCredentialCodec())
     pool = AccountPool(
         store.load_latest(), max_concurrent_per_account=1,
-        cooldown_seconds=_positive_int_from_env('XHS_ACCOUNT_COOLDOWN_SECONDS', 300),
+        cooldown_seconds=_positive_int_from_env('XHS_ACCOUNT_COOLDOWN_SECONDS', 900),
         cooldown_failure_limit=0, manage_auth_resources=True,
     )
     return XhsService(pool, store)
@@ -54,8 +56,9 @@ class XhsService:
         self.account_pool = account_pool
         self.credential_store = credential_store
         self.client_factory = client_factory
-        self.max_concurrent = _positive_int_from_env('XHS_MAX_CONCURRENT_REQUESTS', 2)
+        self.max_concurrent = _positive_int_from_env('XHS_MAX_CONCURRENT_REQUESTS', 1)
         self._semaphore = threading.BoundedSemaphore(self.max_concurrent)
+        self.request_policy = XhsRequestPolicy.from_env()
         self.snapshot_interval = _positive_int_from_env('XHS_SNAPSHOT_INTERVAL_SECONDS', 60)
         self._snapshot_times = {}
 
@@ -120,34 +123,58 @@ class XhsService:
             logger.error('小红书状态保存失败 account_id={} error_type={}', account_id, type(error).__name__)
 
     def _execute(self, operation, request_id):
-        if not self._semaphore.acquire(timeout=5):
-            raise XhsApiError('XHS_NO_AVAILABLE_ACCOUNT', '小红书请求并发已满', 503)
+        # 有界等待取代立即重试；入口并发与账号槽位共用等待预算。
+        deadline = time.monotonic() + self.request_policy.acquire_timeout
+        if not self._semaphore.acquire(timeout=self.request_policy.acquire_timeout):
+            raise self.request_policy.queue_full()
         excluded = set()
+        last_auth_error = None
         try:
             for attempt in range(2):
                 try:
-                    with self.account_pool.acquire(exclude=excluded, timeout=5) as lease:
+                    with self.account_pool.acquire(exclude=excluded, timeout=max(0, deadline - time.monotonic())) as lease:
                         client = self.client_factory(lease.auth)
+                        client.request_policy = self.request_policy
                         try:
                             self.prepare_runtime(lease.auth)
                             if not getattr(lease.auth, 'login_verified', False):
                                 client.bootstrap()
                             result = operation(client)
-                        except XhsAuthenticationError:
-                            self.account_pool.mark_auth_failure(lease.account_id, lease.row_id, lease.auth)
+                        except XhsAuthenticationError as error:
+                            last_auth_error = error
+                            lease.auth.login_verified = False
+                            logger.warning('[{}] 小红书账号登录已过期，请重新登录 account_id={}',
+                                           request_id, lease.account_id)
+                            self.account_pool.remove_account(lease.account_id, lease.row_id, lease.auth)
                             excluded.add(lease.account_id)
                             if attempt == 1:
                                 raise
                             continue
-                        except XhsRiskControlError:
-                            self.account_pool.mark_risk_control(lease.account_id, lease.row_id, lease.auth)
+                        except XhsRiskControlError as error:
+                            cooldown = max(self.account_pool.cooldown_seconds,
+                                           (error.details or {}).get('retry_after_seconds', 0))
+                            self.account_pool.mark_risk_control(lease.account_id, lease.row_id, lease.auth,
+                                                                cooldown_seconds=cooldown)
+                            logger.warning('[{}] 小红书账号风控，冷却秒数={} account_id={}',
+                                           request_id, cooldown, lease.account_id)
+                            error.details = dict(error.details or {}, retry_after_seconds=math.ceil(cooldown),
+                                                 reason='account_risk_control')
                             raise
                         finally:
                             self.persist_snapshot(lease.account_id, lease.auth)
                         result.update(account_id=lease.account_id, failover_count=attempt)
                         return result
                 except NoAvailableAccountError as error:
+                    # 切换账号失败时保留本次请求已确认的登录过期原因。
+                    if last_auth_error is not None:
+                        raise last_auth_error from error
                     details = {'retry_after_seconds': error.retry_after_seconds} if error.retry_after_seconds else None
+                    stats = self.account_pool.stats()
+                    reason = ('accounts_cooling' if not stats['available'] and stats['cooling'] else
+                              'account_busy' if stats['available'] else 'no_valid_accounts')
+                    details = dict(details or {}, reason=reason)
+                    if reason == 'account_busy':
+                        details['retry_after_seconds'] = 1
                     raise XhsApiError('XHS_NO_AVAILABLE_ACCOUNT', '当前没有可用的小红书账号', 503, details) from error
         finally:
             self._semaphore.release()

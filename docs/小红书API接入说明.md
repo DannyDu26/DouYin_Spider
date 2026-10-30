@@ -183,23 +183,47 @@ ID 为 24 位十六进制字符串。支持完整 `www.xiaohongshu.com` HTTPS �
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | XHS_ENABLED | true | 启用小红书，需先迁移 remark |
-| XHS_MAX_CONCURRENT_REQUESTS | 2 | 小红书全局并发，每账号固定为 1 |
-| XHS_ACCOUNT_COOLDOWN_SECONDS | 300 | 认证失败或风控后的冷却时间 |
+| XHS_MAX_CONCURRENT_REQUESTS | 1 | 小红书入口并发，每账号固定为 1；实际上游业务请求统一串行 |
+| XHS_ACCOUNT_COOLDOWN_SECONDS | 900 | 风控后账号冷却秒数；上游 Retry-After 更长时使用上游值 |
+| XHS_REQUEST_INTERVAL_SECONDS | 5 | 上一次业务请求结束后至少等待的秒数，支持非负小数 |
+| XHS_REQUEST_JITTER_SECONDS | 5 | 请求间隔及退避额外随机等待的最大秒数 |
+| XHS_REQUEST_QUEUE_TIMEOUT_SECONDS | 30 | 入口及账号槽位的等待预算；传输阶段另有同长度的排队与重试预算，均包含各自阶段已用时间 |
+| XHS_UPSTREAM_MAX_RETRIES | 2 | 上游 HTTP 503 的最大重试次数，0～10；不含首次请求 |
+| XHS_UPSTREAM_BACKOFF_SECONDS | 5 | 上游 503 指数退避基数，必须大于零 |
+| XHS_UPSTREAM_BACKOFF_MAX_SECONDS | 60 | 自动退避上限，不得小于基数；上游 Retry-After 可以超过此上限 |
 | XHS_SNAPSHOT_INTERVAL_SECONDS | 60 | 普通状态快照间隔 |
-| XHS_SMS_SESSION_TIMEOUT_SECONDS | 300 | 登录会话有效时间 |
+| XHS_SMS_SESSION_TIMEOUT_SECONDS | 300 | 短信登录会话有效时间，最低 300 秒；更小的配置按 300 秒处理 |
 | XHS_SMS_SESSION_RETENTION_SECONDS | 300 | 短信与扫码终止状态保留时间 |
 | XHS_SMS_RESEND_INTERVAL_SECONDS | 60 | 同一手机号发送间隔 |
 | XHS_SMS_MAX_SESSIONS | 10 | 短信与扫码合计最大活跃会话数 |
 | XHS_SMS_MAX_CODE_ATTEMPTS | 5 | 每会话最多提交验证码次数 |
 | XHS_QR_SESSION_TIMEOUT_SECONDS | 180 | 二维码会话有效时间 |
 
-账号池刷新沿用 `ACCOUNT_REFRESH_INTERVAL_SECONDS`。`/api/health` 的 `data.xhs` 返回小红书启用状态及账号统计。无可用账号为 503，明确上游风控为 429，参数错误为 422，其他上游失败为 502。认证失败最多切换账号一次；风控直接冷却实际账号并返回错误，业务错误不冷却账号。
+账号池刷新沿用 `ACCOUNT_REFRESH_INTERVAL_SECONDS`。`/api/health` 的 `data.xhs` 返回小红书启用状态及账号统计。认证过期返回 401，移出过期账号并最多切换一次；风控只冷却实际账号，不立即重试或切换账号，业务错误不冷却账号。
+
+六项业务接口及其 `/user/me` 登录校验共享进程内节流器，包括分页和重试；等待结束后再签名，重试重新生成签名。默认每次请求完成后等待 5～10 秒，默认单个账号冷却 15 分钟。短信发送、扫码轮询和安全材料刷新保留各自原有流程，不自动重放登录操作。抖音的 `SEARCH_VIDEOS_INTERVAL_SECONDS` 不控制小红书。
+
+上游 503 使用指数退避并最多重试两次；支持秒数及 HTTP 日期格式的 `Retry-After`，不会提前重试。如果等待超过本次预算，直接返回剩余等待时间；等待期内新请求不会继续访问上游，等待结束后串行探测，成功后清除故障计数。网络超时、401、429、其他 HTTP 错误和业务错误不自动重试。传输预算限制排队和再次发起请求，已经开始的签名、网络请求仍受各自超时控制，不是整个 API 的硬超时。
+
+| HTTP / error.code | details.reason | 调用方处理 |
+| --- | --- | --- |
+| 429 / XHS_RISK_CONTROL | account_risk_control | 停止当前任务，等待冷却；出现验证要求时先完成正常验证 |
+| 503 / XHS_NO_AVAILABLE_ACCOUNT | accounts_cooling | 按等待时间暂停，再从原页或原 cursor 继续 |
+| 503 / XHS_NO_AVAILABLE_ACCOUNT | no_valid_accounts | 检查账号池及登录状态，不要无限重试 |
+| 503 / XHS_NO_AVAILABLE_ACCOUNT | account_busy | 降低并发，稍后重试 |
+| 503 / XHS_REQUEST_QUEUE_FULL | queue_timeout | 降低提交频率，等待后重试 |
+| 503 / XHS_UPSTREAM_UNAVAILABLE | upstream_backoff | 上游临时故障，按等待时间重试 |
+| 503 / XHS_SERVICE_UNAVAILABLE | 无 | 检查服务是否启用及初始化是否成功 |
+
+存在等待提示的 429/503 同时返回 `Retry-After` 响应头和 `error.details.retry_after_seconds`。调用方必须遵守等待时间，不应收到 503 后立即循环重试。建议保存每页结果和分页断点、按笔记 ID 去重，按需抓取评论回复；调低频率不能保证上游不再限制访问。
+
+以上调度与冷却状态均在进程内，服务重启会清空；维持单实例、单 worker。多实例部署需要先改为共享的限速与冷却存储。浏览器扩展直接访问小红书，不经过此服务端节流器。
 
 ## 验证
 
 ```powershell
 # 离线测试不会发送真实短信或查询真实账号。
-conda run --no-capture-output -n crawler python -m pytest tests/test_xhs_api.py tests/test_xhs_credentials.py tests/test_xhs_login.py tests/test_xhs_qr_login.py tests/test_xhs_signing.py -q
+conda run --no-capture-output -n crawler python -m pytest tests/test_xhs_request_policy.py tests/test_xhs_api.py tests/test_xhs_credentials.py tests/test_xhs_login.py tests/test_xhs_qr_login.py tests/test_xhs_signing.py -q
 ```
 
 真实短信登录、扫码登录与六个接口仍需要有效账号及目标链接进行联调。迁移 SQL、Docker 构建和真实上游验证应分别完成，离线测试不代表上游始终接受签名。

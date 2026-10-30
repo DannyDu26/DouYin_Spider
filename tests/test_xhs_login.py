@@ -117,6 +117,34 @@ def test_wrong_code_retry_and_resend_limit():
     run(scenario())
 
 
+@pytest.mark.parametrize('configured_timeout, expected_timeout', [(30, 300), (300, 300), (600, 600)])
+def test_sms_login_remains_available_after_thirty_seconds(monkeypatch, configured_timeout, expected_timeout):
+    """旧部署配置为三十秒时，用户仍可在五分钟内提交验证码。"""
+    monkeypatch.setenv('XHS_SMS_SESSION_TIMEOUT_SECONDS', str(configured_timeout))
+    now = [1800000000.0]
+    monkeypatch.setattr('app.xhs_login_service.time.time', lambda: now[0])
+
+    async def scenario():
+        store = make_store()
+        pool = AccountPool(manage_auth_resources=True, cooldown_failure_limit=0)
+        service = XhsLoginService(store, pool, FakeLogin)
+        try:
+            sent = await service.send_sms(SmsSessionRequest(account_id='one', phone='13800000000'))
+            session = service.sessions[sent['session_id']]
+            assert session.expires_at - session.created_at == expected_timeout
+            # 模拟收到短信并回复验证码耗时超过三十秒，不触发真实短信请求。
+            now[0] += 31
+            logged_in = await service.login_sms(session.session_id, '123456')
+            assert logged_in['status'] == 'succeeded'
+            assert pool.stats()['available'] == 1
+        finally:
+            await service.shutdown()
+            pool.close()
+            store.close()
+
+    run(scenario())
+
+
 def test_database_failure_never_adds_account():
     async def scenario():
         class BrokenStore:

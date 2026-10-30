@@ -18,9 +18,9 @@ DOUYIN_QR_SESSION_DESCRIPTION = (
 
 # 按平台排列常用登录和数据查询。
 OPENAPI_TAGS = [
-    {'name': XHS_LOGIN_TAG, 'description': '任选一种登录：短信发送验证码 → 提交验证码；扫码生成二维码 → 等待确认并登录。两种方式均无需客户端轮询，账号列表用于查看入池结果。'},
+    {'name': XHS_LOGIN_TAG, 'description': '短信发送验证码 → 提交验证码；扫码生成二维码 → 等待确认并登录。也可通过插件手动导入浏览器 Cookie（需独立同步密钥）。账号列表用于查看入池结果。'},
     {'name': XHS_DATA_TAG, 'description': '登录成功后查询笔记、用户和评论。分页接口每次返回一页，条目保留原始字段。'},
-    {'name': DOUYIN_LOGIN_TAG, 'description': '创建扫码会话 → 展示二维码 → 查询状态，必要时提交短信验证码。'},
+    {'name': DOUYIN_LOGIN_TAG, 'description': '创建扫码会话 → 展示二维码 → 查询状态，必要时提交短信验证码。也可通过插件手动导入浏览器 Cookie（需配置抖音同步密钥）。'},
     {'name': DOUYIN_DATA_TAG, 'description': '查询作品详情、用户作品、关键词搜索和评论。'},
     {'name': SYSTEM_TAG, 'description': '检查服务、数据库和两个平台账号池的运行状态。'},
 ]
@@ -56,6 +56,18 @@ def _parameter_table(rows):
     return header + ''.join('\n| ' + ' | '.join(_table_cell(cell) for cell in row) + ' |' for row in rows)
 
 
+def _dependency_parameters(dependant, attribute):
+    """展开依赖注入的参数，避免同步密钥等请求头在说明表中漏掉。"""
+    parameters = {}
+    pending = [dependant]
+    while pending:
+        current = pending.pop()
+        for item in getattr(current, attribute):
+            parameters.setdefault(item.alias, item)
+        pending.extend(current.dependencies)
+    return list(parameters.values())
+
+
 def append_parameter_docs(application):
     """把模型说明展开到接口描述中，即使隐藏 Schemas 也能查看参数。"""
     for route in application.routes:
@@ -79,8 +91,10 @@ def append_parameter_docs(application):
             sections.append('**请求体参数（JSON）**\n\n' + _parameter_table(rows))
         # 路径参数和请求体同时存在时，分别注明传参位置。
         for title, parameters in (
-            ('路径参数', route.dependant.path_params), ('查询参数', route.dependant.query_params),
-            ('请求头参数', route.dependant.header_params), ('Cookie 参数', route.dependant.cookie_params),
+            ('路径参数', _dependency_parameters(route.dependant, 'path_params')),
+            ('查询参数', _dependency_parameters(route.dependant, 'query_params')),
+            ('请求头参数', _dependency_parameters(route.dependant, 'header_params')),
+            ('Cookie 参数', _dependency_parameters(route.dependant, 'cookie_params')),
         ):
             if parameters:
                 rows = [(f'`{item.alias}`', _schema_type(TypeAdapter(item.field_info.annotation).json_schema()), '是' if item.field_info.is_required() else '否',

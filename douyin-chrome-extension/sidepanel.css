@@ -14,6 +14,12 @@
   --danger: #b42335;
 }
 
+/* 同步表单独立于采集表单，不参与查询参数持久化。 */
+.cookie-sync { margin: 12px 14px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.cookie-sync summary { cursor: pointer; font-weight: 600; }
+.cookie-sync-form { display: grid; gap: 12px; margin-top: 12px; }
+.cookie-sync p { overflow-wrap: anywhere; }
+
 * {
   box-sizing: border-box;
 }
